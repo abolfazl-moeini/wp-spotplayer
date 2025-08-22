@@ -1,0 +1,242 @@
+@font-face {
+    font-family: spfont;
+    src: url(font.woff);
+}
+
+.woocommerce-order-details > #sp {
+    margin: 40px 0;
+}
+
+#sp {
+    direction: rtl;
+    font-family: spfont, sans-serif !important;
+    font-size: 14px !important;
+}
+
+#sp H1 {
+    font-family: spfont, sans-serif;
+    font-size: 26px;
+    font-weight: 800;
+    margin-bottom: 15px;
+}
+
+#sp H2 {
+    font-family: spfont, sans-serif;
+    font-size: 20px;
+    font-weight: 800;
+    margin-bottom: 15px;
+}
+
+#sp H3 {
+    font-family: spfont, sans-serif;
+    font-size: 18px;
+    font-weight: 800;
+}
+
+#sp H4 {
+    font-family: spfont, sans-serif !important;
+}
+
+#sp B {
+    color: #61D;
+    font-size: 22px;
+    vertical-align: middle;
+}
+
+#sp P {
+    line-height: 1.8;
+    font-size: 14px !important;
+}
+
+#sp UL {
+    list-style: none;
+    padding: 0 !important;
+    margin: 0 !important;
+}
+
+#sp-warn {
+    background: #fff3f3;
+    color: #900;
+    border-radius: 5px;
+    margin-bottom: 30px;
+    padding: 5px 10px;
+}
+
+#sp-web > p {
+    margin-bottom: 10px;
+}
+
+#sp-web ~ #sp-app {
+    margin-top: 70px;
+}
+
+#sp-app > DIV {
+    margin-top: 20px;
+}
+
+/*--------------------------------------------------------------------*/
+#spotplayer {
+    border: 1px solid #AAA;
+    width: 100%;
+    height: 550px;
+    overflow: hidden;
+    border-radius: 5px;
+}
+
+/*--------------------------------------------------------------------*/
+#sp_players > DIV {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    background: #f7f1ff;
+    border-radius: 5px;
+    padding: 10px 10px 5px;
+}
+
+#sp_players > DIV > A {
+    flex-basis: 0;
+    flex-grow: 1;
+    min-width: 100px;
+    text-align: center;
+    padding: 10px;
+}
+
+#sp_players > DIV > A.disable {
+    opacity: 0.4;
+    pointer-events: none;
+}
+
+#sp_players > DIV > A > IMG {
+    width: 80px;
+    border-radius: 10px;
+    display: inline-block;
+    margin-bottom: 5px;
+}
+
+#sp_players > DIV > A > B {
+    display: block;
+    font-weight: 700;
+    font-size: 14px;
+}
+
+#sp_players > DIV > A > U {
+    color: #666;
+    font-size: 12px;
+    text-decoration: none;
+}
+
+/*-------------------*/
+#sp_license > TEXTAREA {
+    direction: ltr;
+    width: 100%;
+    height: 100px;
+    display: block;
+    border: 1px solid #999;
+    border-bottom: none;
+    outline: none !important;
+}
+
+#sp_license > BUTTON {
+    display: block;
+    width: 100%;
+    background: #61D;
+    color: #FFF;
+    border-radius: 0 0 5px 5px;
+    border: none !important;
+    outline: none !important;
+    padding: 7px 0;
+    cursor: pointer;
+}
+
+/*--------------------------------------------------------------------*/
+#sp_videos IMG {
+    margin: 0 0 0 7px;
+    vertical-align: middle;
+    width: 15px;
+}
+
+#sp_videos > UL {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+#sp_videos > UL > LI {
+    max-height: 40px;
+    overflow: hidden;
+    border: 1px solid #999;
+    border-radius: 5px;
+    margin-bottom: 5px;
+    padding: 0 10px 15px;
+    transition: all 0.5s;
+    transition-timing-function: ease-out;
+    line-height: 1.8;
+}
+
+#sp_videos > UL > LI.active {
+    max-height: 4000px;
+    transition-timing-function: ease-in;
+}
+
+#sp_videos > UL > LI > H4 {
+    padding: 0;
+    margin: 0;
+    line-height: 35px;
+    font-size: 15px;
+    cursor: pointer;
+}
+
+#sp_videos > UL > LI > H4 > IMG {
+    transition: all 0.5s;
+}
+
+#sp_videos > UL > LI.active > H4 > IMG {
+    transform: scale(1, -1);
+}
+
+#sp_videos > UL > LI > UL > LI {
+    margin: 0;
+}
+
+#sp_videos > UL > LI > UL > LI.sp_seg {
+    margin-top: 15px;
+    border-bottom: 1px dashed #999;
+    padding-bottom: 3px;
+    margin-bottom: 3px;
+}
+
+#sp_videos > UL > LI > UL > LI.sp_seg > A {
+    color: #333;
+    pointer-events: none;
+    font-weight: bold;
+}
+
+#sp_videos > UL > LI > UL > LI.sp_seg > A > IMG {
+    display: none !important;
+}
+
+
+/*--------------------------------------------------------------------*/
+#sp_courses {
+    display: flex;
+}
+
+#sp_courses > A {
+    width: 33.33%;
+    padding: 5px;
+}
+
+#sp_courses > A > IMG {
+    border: 1px solid #CCC;
+    border-radius: 5px;
+}
+
+#sp_courses > A > H2 {
+    font-size: 18px;
+    margin: 10px 0;
+}
+
+#sp_courses > A > DIV {
+    font-size: 14px;
+    margin: 0;
+}

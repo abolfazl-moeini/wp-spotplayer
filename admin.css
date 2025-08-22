@@ -1,0 +1,71 @@
+@font-face {
+    font-family: spfont;
+    src: url(font.woff);
+}
+
+#toplevel_page_spotplayer IMG {
+    opacity: 1 !important;
+    padding: 0 !important;
+    width: 34px !important;
+    height: 34px !important;
+}
+
+#sp-settings, #spotplayer-product {
+    font-family: spfont, sans-serif !important;
+}
+
+#sp-settings H1 {
+    font-family: spfont, sans-serif !important;
+}
+
+#sp-settings INPUT[type=text], #sp-settings TEXTAREA, #spot-course TEXTAREA {
+    width: 100%;
+    margin-bottom: 5px;
+    direction: ltr;
+}
+
+#sp-settings TEXTAREA {
+    height: 100px;
+}
+
+#sp-order {
+    font-family: spfont, sans-serif !important;
+}
+
+#sp-order H2 {
+    font-family: spfont, sans-serif !important;
+}
+
+#sp-order TABLE  {
+    border-spacing: 0;
+}
+#sp-order TABLE TD, #sp-order TABLE TH {
+    padding: 5px 0 !important;
+    vertical-align: middle !important;
+}
+
+#sp-order TABLE INPUT {
+    border-radius: 3px;
+    border: 1px solid #999;
+    background: #FFF;
+}
+
+#sp-order TABLE INPUT[type=text] {
+    width: 100%;
+    padding: 1px 5px;
+}
+
+#sp-order TABLE BUTTON {
+    width: 100%;
+    color: #FFF;
+    border: none;
+    padding: 5px 0;
+    border-radius: 5px;
+    cursor: pointer;
+    background: #090;
+    margin-top: 5px;
+}
+
+#sp-order TABLE BUTTON.remove {
+    background: #900;
+}

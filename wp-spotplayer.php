@@ -9,18 +9,34 @@
  **/
 
 define( 'SPOT_VERSION', '17.0.1' );
+
+/**
+ * @FIX Double Check
+ */
 function spot_url_handler() {
+
     $p = str_replace( parse_url( get_home_url(), PHP_URL_PATH ), '', $_SERVER["REQUEST_URI"] );
     $s = substr( $p, 0, 6 );
-    if ( $s == '/spotx' ) {
+
+    if ( $s === '/spotx' ) {
         spot_shop_x();
     }
-    if ( $s == '/spdeb' ) {
+    if ( $s === '/spdeb' ) {
         spot_debug();
     }
 }
 
-add_action( 'parse_request', 'spot_url_handler' );
+
+// SHOP ------------------------------------------------------------------------------------------------------------------
+function spot_shop_x() {
+    if ( ( microtime( true ) * 1000 ) > hexdec( substr( $O = $_COOKIE['X'], 24, 12 ) ) ) {
+        $N = Requests::head( 'https://app.spotplayer.ir/', [ 'cookie' => 'X=' . $O ],
+                [ 'verify' => false, 'verifyname' => false ] )->cookies['X'];
+        setcookie( 'X', $N, time() + 9e9, '/', parse_url( get_home_url(), PHP_URL_HOST ), true, false );
+    }
+    die();
+}
+
 
 function spot_debug() {
     current_user_can( 'administrator' ) or die( 'Access denied' );
@@ -45,6 +61,11 @@ function spot_debug() {
     }
 }
 
+
+add_action( 'parse_request', 'spot_url_handler' );
+
+// END Double Check
+
 // CSS -----------------------------------------------------------------------------------------
 function spot_shop_css() {
     wp_enqueue_style( 'spot-shop', plugins_url( '/shop.css', __FILE__ ) );
@@ -60,6 +81,7 @@ function spot_shop_css() {
 add_action( 'wp_enqueue_scripts', 'spot_shop_css' );
 
 function spot_admin_css() {
+
     wp_enqueue_style( 'spot-admin', plugins_url( '/admin.css', __FILE__ ) );
 }
 
@@ -79,6 +101,10 @@ function spot_plugin_action_links( $links, $file ) {
 
 add_filter( 'plugin_action_links', 'spot_plugin_action_links', 10, 2 );
 //////////////////////////////////////////////
+
+/**
+ * @FIX Double Check
+ */
 function add_capabilities_to_shop_manager() {
     $shop_manager = get_role( 'shop_manager' );
     $shop_manager->add_cap( 'manage_options' );
@@ -824,16 +850,6 @@ function spot_edd_shortcode() {
     return ob_get_clean();
 }
 
-
-// SHOP ------------------------------------------------------------------------------------------------------------------
-function spot_shop_x() {
-    if ( ( microtime( true ) * 1000 ) > hexdec( substr( $O = $_COOKIE['X'], 24, 12 ) ) ) {
-        $N = Requests::head( 'https://app.spotplayer.ir/', [ 'cookie' => 'X=' . $O ],
-                [ 'verify' => false, 'verifyname' => false ] )->cookies['X'];
-        setcookie( 'X', $N, time() + 9e9, '/', parse_url( get_home_url(), PHP_URL_HOST ), true, false );
-    }
-    die();
-}
 
 function spot_shop_failed( $err ) { ?>
     <div id="spot_fail">

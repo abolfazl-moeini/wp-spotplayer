@@ -1,0 +1,5 @@
+/* SpotPlayer Public minimal styles (refactor) */
+#sp { max-width: 880px; margin: 1rem auto; padding: .5rem 1rem; }
+#sp h3 { margin-top: .5rem; }
+#sp_players > div { padding: .75rem; border-radius: .5rem; }
+#sp_license > button { border: 0; padding: .5rem 1rem; border-radius: .5rem; cursor: pointer; }

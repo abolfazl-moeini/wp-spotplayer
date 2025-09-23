@@ -1001,18 +1001,41 @@ add_shortcode( 'spotplayer_courses', 'spot_shortcode' );
 
 // WOO FUNCS ------------------------------------------------------------------------------------------------------------------
 /** @return WC_Product[] */
-function spot_woo_order_items( ?WC_Order $ord, $products = false ): array {
-    $r = [];
-    if ( $ord ) {
-        foreach ( $ord->get_items() as $i ) {
-            if ( ( $i instanceof WC_Order_Item_Product ) && ( ( $p = $i->get_product() ) instanceof WC_Product ) && ( $c = $p->get_meta( '_spotplayer_course' ) ) ) {
-                $products ? array_push( $r, $p ) : ( $r = array_merge( $r, explode( ',', $c ) ) );
-            }
-        }
+function spot_woo_order_items( ?WC_Order $order, $products = false ): array {
+    $result = [];
+    if ( ! $order ) {
+
+        return $result;
     }
 
-    return $r;
+    foreach ( $order->get_items() as $item ) {
+
+        if ( ! $item instanceof WC_Order_Item_Product ) {
+
+            continue;
+        }
+
+        $product = $item->get_product();
+
+        if ( ! $product instanceof WC_Product ) {
+
+            continue;
+        }
+
+        if ( $products ) {
+
+            $result[] = $product;
+
+            continue;
+        }
+
+        $licenses = $product->get_meta( '_spotplayer_course' );
+        $result   = array_merge( $result, explode( ',', $licenses ) );
+    }
+
+    return $result;
 }
+
 
 /** @throws Exception */
 function spot_woo_order_license_request( WC_Order $ord, $admin = false ): ?array {

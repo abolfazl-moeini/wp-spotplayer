@@ -517,17 +517,27 @@ function spot_woo_admin_product_save( $product, $course ) {
 
 // WOO ADMIN ORDER --------------------------------------------------------------------------------------------
 function spot_woo_admin_order() {
-    if ( function_exists( 'wc_get_order' ) && count( spot_woo_order_items( wc_get_order() ?: null ) ) ) {
+    if (!function_exists('wc_get_order')) {
+
+        return ;
+    }
+
+    if(! $order = wc_get_order()) {
+
+        return ;
+    }
+
+    if(spot_woo_order_items($order) || spot_check_order_has_any_license($order->get_id())) {
+
         add_meta_box(
                 'sp-order',
                 'اسپات پلیر',
                 'spot_woo_admin_order_box',
-                null,
+                'shop_order',
                 'normal',
-                'high'
-        );
-    }
+                'high');
 
+    }
 }
 
 add_action( 'add_meta_boxes', 'spot_woo_admin_order', 0 );
@@ -542,7 +552,7 @@ function spot_woo_admin_order_save( int $oid ) {
         return;
     }
     $ord = wc_get_order( $oid );
-    if ( ! count( spot_woo_order_items( $ord ) ) ) {
+    if ( ! count( spot_woo_order_items( $ord ) )  && ! spot_check_order_has_any_license($ord->get_id()) ) {
         return;
     }
     if ( @$_POST['spot-remove'] ) {
@@ -708,7 +718,7 @@ function spot_woo_shop_order( WC_Order $ord ) {
             [ 'processing', 'completed', 'partial-payment', 'partially-paid' ] ) ) {
         return;
     }
-    if ( ! count( spot_woo_order_items( $ord ) ) ) {
+    if ( ! count( spot_woo_order_items( $ord ) )  && ! spot_check_order_has_any_license($ord->get_id()) ) {
         return;
     }
 
@@ -1029,11 +1039,24 @@ function spot_woo_order_items( ?WC_Order $order, $products = false ): array {
             continue;
         }
 
-        $licenses = $product->get_meta( '_spotplayer_course' );
-        $result   = array_merge( $result, explode( ',', $licenses ) );
+        if($licenses = $product->get_meta( '_spotplayer_course' )) {
+
+            $result   = array_merge( $result, explode( ',', $licenses ) );
+        }
     }
 
     return $result;
+}
+
+function spot_check_order_has_any_license( int $oder_id ) {
+    global $wpdb;
+
+    $note = $wpdb->get_var( $wpdb->prepare( "SELECT comment_content FROM $wpdb->comments WHERE comment_post_ID = %d AND comment_type = 'order_note' ORDER BY comment_ID DESC LIMIT 1",
+            $oder_id ) );
+
+    preg_match( '#license/edit/+([^/\'"\s]+)#i', $note, $matches );
+
+    return $matches[1] ?? '';
 }
 
 

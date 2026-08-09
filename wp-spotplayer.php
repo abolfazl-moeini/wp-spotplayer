@@ -1,18 +1,46 @@
 <?php
 /**
  * Plugin Name: اسپات پلیر
- * Version: 17.1.0
+ * Version: 17.1.1
  * Description: ابتدا در تنظیمات اسپات پلیر کلید API و کد ساخت لایسنس و سپس شناسه دوره‌های هر محصول را وارد نمایید.
  * Author: SpotPlayer.ir
  * Author URI: https://spotplayer.ir/
  * Requires PHP: 7.1
+ * WC requires at least: 7.0
+ * WC tested up to: 9.8
  **/
 
 if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'SPOT_VERSION', '17.1.0' );
+define( 'SPOT_VERSION', '17.1.1' );
+
+/**
+ * Declare compatibility with WooCommerce High-Performance Order Storage (HPOS).
+ */
+add_action( 'before_woocommerce_init', function () {
+    if ( class_exists( \Automattic\WooCommerce\Utilities\FeaturesUtil::class ) ) {
+        \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__, true );
+    }
+} );
+
+/**
+ * Admin edit URL for a WooCommerce order (HPOS + classic CPT).
+ *
+ * @param WC_Order|int $order Order object or ID.
+ */
+function spot_get_order_edit_url( $order ): string {
+    if ( ! $order instanceof WC_Order ) {
+        $order = function_exists( 'wc_get_order' ) ? wc_get_order( $order ) : null;
+    }
+    if ( $order instanceof WC_Order && is_callable( [ $order, 'get_edit_order_url' ] ) ) {
+        return (string) $order->get_edit_order_url();
+    }
+    $id = $order instanceof WC_Order ? $order->get_id() : absint( $order );
+
+    return $id ? (string) get_edit_post_link( $id, 'raw' ) : '';
+}
 
 /**
  * Capability used for SpotPlayer admin UI.
@@ -27,6 +55,13 @@ function spot_user_can_manage(): bool {
 }
 
 function spot_user_can_edit_api(): bool {
+    return spot_user_can_edit_sensitive();
+}
+
+/**
+ * Sensitive settings (API key, rebrand domain, eval license code).
+ */
+function spot_user_can_edit_sensitive(): bool {
     return current_user_can( 'manage_options' );
 }
 
@@ -49,9 +84,10 @@ function spot_sanitize_settings( $input ): array {
         return $prev;
     }
 
-    $out = [];
+    // Preserve unknown keys that may be used by site-specific customizations.
+    $out = $prev;
 
-    if ( spot_user_can_edit_api() ) {
+    if ( spot_user_can_edit_sensitive() ) {
         $api = isset( $input['api'] ) ? sanitize_text_field( wp_unslash( $input['api'] ) ) : '';
         if ( $api === '' || preg_match( '/^(?:[A-Za-z0-9+\/]{4})*(?:[A-Za-z0-9+\/]{2}==|[A-Za-z0-9+\/]{3}=)?$/', $api ) ) {
             $out['api'] = $api;
@@ -59,25 +95,27 @@ function spot_sanitize_settings( $input ): array {
             $out['api'] = $prev['api'] ?? '';
             add_settings_error( 'spot_msgs', 'spot_api', 'فرمت کلید API نامعتبر بود و مقدار قبلی حفظ شد.', 'error' );
         }
-    } else {
-        $out['api'] = $prev['api'] ?? '';
-    }
 
-    $domain = isset( $input['domain'] ) ? sanitize_text_field( wp_unslash( $input['domain'] ) ) : '';
-    $out['domain'] = ( $domain !== '' && preg_match( '/^app[0-9]?(\.[a-z0-9\-]+){2,}$/', $domain ) ) ? $domain : '';
+        $domain = isset( $input['domain'] ) ? sanitize_text_field( wp_unslash( $input['domain'] ) ) : '';
+        $out['domain'] = ( $domain !== '' && preg_match( '/^app[0-9]?(\.[a-z0-9\-]+){2,}$/', $domain ) ) ? $domain : '';
+
+        // License builder snippet is evaluated server-side; only site admins may change it.
+        $out['code'] = isset( $input['code'] ) ? (string) wp_unslash( $input['code'] ) : '';
+    } else {
+        $out['api']    = $prev['api'] ?? '';
+        $out['domain'] = $prev['domain'] ?? '';
+        $out['code']   = $prev['code'] ?? '';
+    }
 
     $color = isset( $input['color'] ) ? sanitize_hex_color( wp_unslash( $input['color'] ) ) : '';
     $out['color'] = $color ?: ( $prev['color'] ?? '#6611DD' );
-
-    // License builder snippet is evaluated server-side; only admins with settings access can set it.
-    $out['code'] = isset( $input['code'] ) ? (string) wp_unslash( $input['code'] ) : '';
 
     foreach ( [ 'test', 'completed', 'web', 'webonly', 'download', 'wccrs', 'wcspc' ] as $flag ) {
         $out[ $flag ] = ! empty( $input[ $flag ] ) ? 1 : 0;
     }
 
     if ( ! empty( $input['time'] ) ) {
-        $time_val   = absint( $input['time'] );
+        $time_val    = absint( $input['time'] );
         $out['time'] = $time_val > 0 ? $time_val : ( ! empty( $prev['time'] ) ? (int) $prev['time'] : time() );
     } else {
         $out['time'] = 0;
@@ -93,87 +131,202 @@ function spot_sanitize_settings( $input ): array {
     return $out;
 }
 
-function spot_url_handler() {
-    $request_uri = $_SERVER['REQUEST_URI'] ?? '';
-    $p           = str_replace( parse_url( get_home_url(), PHP_URL_PATH ), '', $request_uri );
-    $s           = substr( $p, 0, 6 );
+/**
+ * Normalize request path relative to home URL path.
+ */
+function spot_request_path(): string {
+    $request_uri = (string) ( $_SERVER['REQUEST_URI'] ?? '' );
+    $path        = (string) ( parse_url( $request_uri, PHP_URL_PATH ) ?? '/' );
+    $home_path   = (string) ( parse_url( get_home_url(), PHP_URL_PATH ) ?? '' );
 
-    if ( $s === '/spotx' ) {
+    if ( $home_path !== '' && $home_path !== '/' && strpos( $path, $home_path ) === 0 ) {
+        $path = substr( $path, strlen( $home_path ) );
+    }
+
+    $path = '/' . ltrim( $path, '/' );
+
+    return rtrim( $path, '/' ) ?: '/';
+}
+
+function spot_url_handler() {
+    $path = spot_request_path();
+
+    if ( $path === '/spotx' ) {
         spot_shop_x();
     }
-    if ( $s === '/spdeb' ) {
+    if ( $path === '/spdeb' ) {
         spot_debug();
     }
 }
 
+/**
+ * Validate SpotPlayer session cookie shape roughly before refreshing.
+ */
+function spot_is_valid_x_cookie( string $cookie ): bool {
+    return (bool) preg_match( '/^[A-Za-z0-9+\/=_\-]{36,512}$/', $cookie );
+}
+
 // SHOP ------------------------------------------------------------------------------------------------------------------
 function spot_shop_x() {
-    $cookie_x = $_COOKIE['X'] ?? '';
-    if ( $cookie_x && ( microtime( true ) * 1000 ) > hexdec( substr( $cookie_x, 24, 12 ) ) ) {
-        $new_cookie = null;
-        if ( function_exists( 'wp_remote_head' ) ) {
-            $response = wp_remote_head( 'https://app.spotplayer.ir/', [
-                'headers'   => [ 'cookie' => 'X=' . $cookie_x ],
-                'sslverify' => false,
-            ] );
-            if ( ! is_wp_error( $response ) ) {
-                $cookies = wp_remote_retrieve_cookies( $response );
-                foreach ( $cookies as $cookie ) {
-                    if ( $cookie->name === 'X' ) {
-                        $new_cookie = $cookie->value;
-                        break;
-                    }
+    $cookie_x = (string) ( $_COOKIE['X'] ?? '' );
+    if ( ! spot_is_valid_x_cookie( $cookie_x ) ) {
+        status_header( 204 );
+        exit;
+    }
+
+    $expiry_hex = substr( $cookie_x, 24, 12 );
+    if ( ! ctype_xdigit( $expiry_hex ) ) {
+        status_header( 204 );
+        exit;
+    }
+
+    if ( ( microtime( true ) * 1000 ) <= hexdec( $expiry_hex ) ) {
+        status_header( 204 );
+        exit;
+    }
+
+    $new_cookie = null;
+    if ( function_exists( 'wp_remote_head' ) ) {
+        $response = wp_remote_head( 'https://app.spotplayer.ir/', [
+            'headers'   => [ 'cookie' => 'X=' . $cookie_x ],
+            'sslverify' => true,
+            'timeout'   => 10,
+            'redirection' => 0,
+        ] );
+        if ( ! is_wp_error( $response ) ) {
+            $cookies = wp_remote_retrieve_cookies( $response );
+            foreach ( $cookies as $cookie ) {
+                if ( $cookie->name === 'X' && spot_is_valid_x_cookie( (string) $cookie->value ) ) {
+                    $new_cookie = $cookie->value;
+                    break;
                 }
             }
-        } elseif ( class_exists( 'WpOrg\Requests\Requests' ) ) {
-            $req = \WpOrg\Requests\Requests::head( 'https://app.spotplayer.ir/', [ 'cookie' => 'X=' . $cookie_x ], [ 'verify' => false, 'verifyname' => false ] );
-            $new_cookie = $req->cookies['X'] ?? null;
-        } elseif ( class_exists( 'Requests' ) ) {
-            $req = Requests::head( 'https://app.spotplayer.ir/', [ 'cookie' => 'X=' . $cookie_x ], [ 'verify' => false, 'verifyname' => false ] );
-            $new_cookie = $req->cookies['X'] ?? null;
         }
-
-        if ( $new_cookie ) {
-            setcookie( 'X', $new_cookie, time() + 9e9, '/', parse_url( get_home_url(), PHP_URL_HOST ), true, false );
-        }
+    } elseif ( class_exists( 'WpOrg\Requests\Requests' ) ) {
+        $req = \WpOrg\Requests\Requests::head( 'https://app.spotplayer.ir/', [ 'cookie' => 'X=' . $cookie_x ], [
+            'verify'     => true,
+            'verifyname' => true,
+            'timeout'    => 10,
+        ] );
+        $candidate = isset( $req->cookies['X'] ) ? (string) $req->cookies['X'] : '';
+        $new_cookie = spot_is_valid_x_cookie( $candidate ) ? $candidate : null;
+    } elseif ( class_exists( 'Requests' ) ) {
+        $req = Requests::head( 'https://app.spotplayer.ir/', [ 'cookie' => 'X=' . $cookie_x ], [
+            'verify'     => true,
+            'verifyname' => true,
+            'timeout'    => 10,
+        ] );
+        $candidate = isset( $req->cookies['X'] ) ? (string) $req->cookies['X'] : '';
+        $new_cookie = spot_is_valid_x_cookie( $candidate ) ? $candidate : null;
     }
-    die();
+
+    if ( $new_cookie ) {
+        setcookie( 'X', $new_cookie, [
+            'expires'  => time() + 9e9,
+            'path'     => '/',
+            'domain'   => (string) parse_url( get_home_url(), PHP_URL_HOST ),
+            'secure'   => true,
+            'httponly' => false,
+            'samesite' => 'Lax',
+        ] );
+    }
+
+    status_header( 204 );
+    exit;
 }
 
 function spot_debug() {
     if ( ! current_user_can( 'manage_options' ) ) {
-        wp_die( 'Access denied' );
-    }
-    $id = absint( $_GET['id'] ?? 0 );
-    if ( ! $id ) {
-        wp_die( 'شناسه سفارش نامعتبر است.' );
+        wp_die( 'Access denied', 403 );
     }
 
-    header( 'Content-Type: application/json' );
+    $id = absint( $_GET['id'] ?? 0 );
+    if ( ! $id ) {
+        wp_die( 'شناسه سفارش نامعتبر است.', 400 );
+    }
+
+    $nonce = sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ?? '' ) );
+    if ( ! $nonce || ! wp_verify_nonce( $nonce, 'spot_debug_' . $id ) ) {
+        wp_die( 'لینک دیباگ نامعتبر یا منقضی شده است.', 403 );
+    }
+
+    if ( function_exists( 'nocache_headers' ) ) {
+        nocache_headers();
+    }
+
+    header( 'Content-Type: application/json; charset=utf-8' );
+    header( 'X-Content-Type-Options: nosniff' );
+
     if ( spot_woo_or_edd() == 1 ) {
         $o = wc_get_order( $id );
         if ( ! $o ) {
-            wp_die( 'سفارش یافت نشد.' );
+            wp_die( 'سفارش یافت نشد.', 404 );
         }
         header( 'Content-Disposition: attachment; filename=debug-' . $o->get_id() . '.json' );
-        die( json_encode( [
-            'code' => spot_license_code(),
-            'user' => get_user_meta( $o->get_user_id() ),
-            'data' => $o->get_data(),
-            'meta' => $o->get_meta_data(),
-        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_LINE_TERMINATORS | JSON_PRETTY_PRINT ) );
-    } else {
-        $p = edd_get_payment( $id );
-        if ( ! $p ) {
-            wp_die( 'پرداخت یافت نشد.' );
-        }
-        header( 'Content-Disposition: attachment; filename=debug-' . $p->ID . '.json' );
-        die( json_encode( [
-            'code' => spot_license_code(),
-            'user' => get_user_meta( $p->user_id ),
-            'data' => $p
-        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_LINE_TERMINATORS | JSON_PRETTY_PRINT ) );
+        $payload = [
+            'code'   => spot_license_code(),
+            'user'   => spot_redact_user_meta( get_user_meta( $o->get_user_id() ) ),
+            'order'  => [
+                'id'     => $o->get_id(),
+                'status' => $o->get_status(),
+                'email'  => $o->get_billing_email(),
+                'phone'  => $o->get_billing_phone(),
+                'name'   => $o->get_formatted_billing_full_name(),
+            ],
+            'license' => $o->get_meta( '_spotplayer_data' ),
+        ];
+        die( wp_json_encode( $payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT ) );
     }
+
+    $p = edd_get_payment( $id );
+    if ( ! $p ) {
+        wp_die( 'پرداخت یافت نشد.', 404 );
+    }
+    header( 'Content-Disposition: attachment; filename=debug-' . $p->ID . '.json' );
+    $payload = [
+        'code'    => spot_license_code(),
+        'user'    => spot_redact_user_meta( get_user_meta( (int) $p->user_id ) ),
+        'payment' => [
+            'id'     => $p->ID,
+            'status' => edd_get_payment_status( $p ),
+            'email'  => $p->email,
+            'name'   => trim( $p->first_name . ' ' . $p->last_name ),
+        ],
+        'license' => $p->get_meta( '_spot_data' ),
+    ];
+    die( wp_json_encode( $payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT ) );
+}
+
+/**
+ * Remove passwords and auth tokens from dumped user meta.
+ *
+ * @param array<string, mixed>|mixed $meta
+ * @return array<string, mixed>
+ */
+function spot_redact_user_meta( $meta ): array {
+    if ( ! is_array( $meta ) ) {
+        return [];
+    }
+
+    $sensitive = [ 'user_pass', 'session_tokens', 'wp_capabilities', 'wp_user_level' ];
+    foreach ( $meta as $key => $value ) {
+        $key_l = strtolower( (string) $key );
+        if ( in_array( (string) $key, $sensitive, true ) || strpos( $key_l, 'pass' ) !== false || strpos( $key_l, 'token' ) !== false ) {
+            $meta[ $key ] = '[redacted]';
+        }
+    }
+
+    return $meta;
+}
+
+/**
+ * Build a nonce-protected debug URL for admins.
+ */
+function spot_debug_url( int $id ): string {
+    $path = (string) ( parse_url( get_home_url(), PHP_URL_PATH ) ?? '' );
+    $base = ( $path === '' || $path === '/' ) ? '' : rtrim( $path, '/' );
+
+    return $base . '/spdeb?id=' . $id . '&_wpnonce=' . rawurlencode( wp_create_nonce( 'spot_debug_' . $id ) );
 }
 
 add_action( 'parse_request', 'spot_url_handler' );
@@ -270,7 +423,7 @@ function spot_admin_page() {
             <table class="form-table" role="presentation">
                 <tbody>
                 <tr>
-                    <?php if ( spot_user_can_edit_api() ) { ?>
+                    <?php if ( spot_user_can_edit_sensitive() ) { ?>
                         <th scope="row">کلید API</th>
                         <td>
                             <input type="text" name="spotplayer[api]" value="<?= esc_attr( $sp['api'] ?? '' ) ?>" required
@@ -291,12 +444,16 @@ function spot_admin_page() {
                 <tr>
                     <th scope="row">دامنه ریبرندینگ</th>
                     <td>
-                        <input type="text" name="spotplayer[domain]" value="<?= esc_attr( $sp['domain'] ?? '' ) ?>"
-                               pattern="^app[0-9]?(\.[a-z0-9\-]+){2,}$">
-                        <div class="description">
-                            <div><b style="color: #900">تنها در صورتی که سرویس ریبرندینگ را فعال کرده اید، دامنه تنظیم
-                                    شده را به صورت app.example.com وارد نمایید.</b></div>
-                        </div>
+                        <?php if ( spot_user_can_edit_sensitive() ) { ?>
+                            <input type="text" name="spotplayer[domain]" value="<?= esc_attr( $sp['domain'] ?? '' ) ?>"
+                                   pattern="^app[0-9]?(\.[a-z0-9\-]+){2,}$">
+                            <div class="description">
+                                <div><b style="color: #900">تنها در صورتی که سرویس ریبرندینگ را فعال کرده اید، دامنه تنظیم
+                                        شده را به صورت app.example.com وارد نمایید.</b></div>
+                            </div>
+                        <?php } else { ?>
+                            <p class="description">فقط مدیر کل می‌تواند دامنه ریبرندینگ را مشاهده یا تغییر دهد.</p>
+                        <?php } ?>
                     </td>
                 </tr>
                 <tr>
@@ -308,6 +465,7 @@ function spot_admin_page() {
                 <tr>
                     <th scope="row">کد ساخت لایسنس</th>
                     <td>
+                        <?php if ( spot_user_can_edit_sensitive() ) { ?>
                         <textarea name="spotplayer[code]"><?= esc_textarea( spot_license_code() ) ?></textarea>
                         <div style="background: rgba(0,0,0,0.07); padding: 10px; border-radius: 5px; margin-bottom: 15px">
                             <div style="color: green;">خروجی کد برای آخرین سفارش ثبت شده:</div>
@@ -318,14 +476,14 @@ function spot_admin_page() {
                                     if ( ! $j ) {
                                         echo '<div style="color: red; direction: rtl">هیچ سفارش فعالی وجود ندارد. برای تست لطفا یک سفارش ایجاد کنید.</div>';
                                     } else {
-                                        echo '<pre>' . esc_html( json_encode( $j, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT ) ) . '</pre>';
-                                        if ( ! $j['name'] || ! $j['watermark']['texts'][0]['text'] ) {
+                                        echo '<pre>' . esc_html( wp_json_encode( $j, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT ) ) . '</pre>';
+                                        if ( empty( $j['name'] ) || empty( $j['watermark']['texts'][0]['text'] ) ) {
                                             $id = spot_woo_or_edd() == 1 ? wc_get_orders( [ 'limit' => 1 ] )[0]->get_id() : edd_get_payments( [ 'number' => 1 ] )[0]->ID;
-                                            $a  = '<div style="direction: rtl"><a target="_blank" href="' . parse_url( get_home_url(), PHP_URL_PATH ) . '/spdeb?id=' . $id . '">' . 'اطلاعات دیباگ' . '</a></div>';
-                                            if ( ! $j['name'] ) {
+                                            $a  = '<div style="direction: rtl"><a target="_blank" href="' . esc_url( spot_debug_url( (int) $id ) ) . '">' . 'اطلاعات دیباگ' . '</a></div>';
+                                            if ( empty( $j['name'] ) ) {
                                                 echo '<div style="color: red; direction: rtl">مقدار نام خالی است. لطفا از یک فیلد دیگر برای تعیین مقدار نام استفاده کنید.</div>' . $a;
                                             }
-                                            if ( ! $j['watermark']['texts'][0]['text'] ) {
+                                            if ( empty( $j['watermark']['texts'][0]['text'] ) ) {
                                                 echo '<div style="color: red; direction: rtl">مقدار اولین واترمارک خالی است. لطفا از یک فیلد دیگر برای تعیین مقدار واترمارک استفاده کنید.</div>' . $a;
                                             }
                                         }
@@ -390,6 +548,9 @@ function spot_admin_page() {
                                         دیجیتس را تشخیص و کد را تغییر میدهد.</b></div>
                             <?php } ?>
                         </div>
+                        <?php } else { ?>
+                            <p class="description">فقط مدیر کل می‌تواند کد ساخت لایسنس را مشاهده یا تغییر دهد.</p>
+                        <?php } ?>
                     </td>
                 </tr>
                 <tr>
@@ -608,7 +769,7 @@ function spot_woo_admin_product_update( WC_Product $product ) {
 add_action( 'woocommerce_admin_process_product_object', 'spot_woo_admin_product_update' );
 
 function spot_woo_admin_variation_panel( int $i, $data ) { ?>
-    <div id="spotplayer-product"><?php woocommerce_wp_textarea_input( [
+    <div id="spotplayer-product-variation-<?= esc_attr( (string) $i ) ?>"><?php woocommerce_wp_textarea_input( [
             'id'            => "spotplayer_course$i",
             'name'          => "spotplayer_course[$i]",
             'value'         => $data['_spotplayer_course'][0] ?? '',
@@ -635,11 +796,29 @@ function spot_woo_admin_product_save( $product, $course ) {
     }
     $course = sanitize_text_field( $course );
     if ( preg_match( '/^[0-9a-f]{24}(,[0-9a-f]{24})*$/i', $course ) ) {
+        $had_spot = (bool) $product->get_meta( '_spotplayer_course' );
+        if ( ! $had_spot ) {
+            $product->update_meta_data( '_spotplayer_prev_virtual', $product->get_virtual() ? '1' : '0' );
+            $product->update_meta_data( '_spotplayer_prev_sold_individually', $product->get_sold_individually() ? '1' : '0' );
+        }
         $product->update_meta_data( '_spotplayer_course', $course );
         $product->set_virtual( true );
         $product->set_sold_individually( true );
     } else {
+        $had_spot = (bool) $product->get_meta( '_spotplayer_course' );
         $product->update_meta_data( '_spotplayer_course', '' );
+        if ( $had_spot ) {
+            $prev_virtual = $product->get_meta( '_spotplayer_prev_virtual' );
+            $prev_sold    = $product->get_meta( '_spotplayer_prev_sold_individually' );
+            if ( $prev_virtual !== '' && $prev_virtual !== null ) {
+                $product->set_virtual( $prev_virtual === '1' );
+            }
+            if ( $prev_sold !== '' && $prev_sold !== null ) {
+                $product->set_sold_individually( $prev_sold === '1' );
+            }
+            $product->delete_meta_data( '_spotplayer_prev_virtual' );
+            $product->delete_meta_data( '_spotplayer_prev_sold_individually' );
+        }
     }
 }
 
@@ -647,19 +826,38 @@ function spot_woo_admin_product_save( $product, $course ) {
 /**
  * Resolve the order currently being edited in classic or HPOS screens.
  *
- * @return WC_Order|false|null
+ * @param mixed $post_or_order_object Optional object passed by meta box / screen.
+ * @return WC_Order|null
  */
-function spot_get_current_admin_order() {
+function spot_get_current_admin_order( $post_or_order_object = null ) {
     global $theorder, $post;
+
+    if ( $post_or_order_object instanceof WC_Order ) {
+        return $post_or_order_object;
+    }
+    if ( $post_or_order_object instanceof WP_Post ) {
+        $order = wc_get_order( $post_or_order_object->ID );
+        return $order instanceof WC_Order ? $order : null;
+    }
 
     if ( isset( $theorder ) && $theorder instanceof WC_Order ) {
         return $theorder;
     }
-    if ( isset( $post->ID ) ) {
-        return wc_get_order( $post->ID );
+
+    // HPOS order editor: admin.php?page=wc-orders&action=edit&id=123
+    $page = isset( $_GET['page'] ) ? sanitize_text_field( wp_unslash( $_GET['page'] ) ) : '';
+    if ( $page === 'wc-orders' && ! empty( $_GET['id'] ) ) {
+        $order = wc_get_order( absint( $_GET['id'] ) );
+        if ( $order instanceof WC_Order ) {
+            return $order;
+        }
     }
-    if ( function_exists( 'wc_get_order' ) ) {
-        return wc_get_order();
+
+    if ( isset( $post->ID ) ) {
+        $order = wc_get_order( $post->ID );
+        if ( $order instanceof WC_Order ) {
+            return $order;
+        }
     }
 
     return null;
@@ -679,6 +877,7 @@ function spot_woo_admin_order() {
         return;
     }
 
+    // Dual support: classic CPT screen + HPOS screen id.
     $screens = [ 'shop_order' ];
     if ( function_exists( 'wc_get_page_screen_id' ) ) {
         $screens[] = wc_get_page_screen_id( 'shop-order' );
@@ -698,8 +897,11 @@ function spot_woo_admin_order() {
 
 add_action( 'add_meta_boxes', 'spot_woo_admin_order', 0 );
 
-function spot_woo_admin_order_box() {
-    $order = spot_get_current_admin_order();
+/**
+ * @param WC_Order|WP_Post|null $post_or_order_object Passed by WP/WC meta box API.
+ */
+function spot_woo_admin_order_box( $post_or_order_object = null ) {
+    $order = spot_get_current_admin_order( $post_or_order_object );
     if ( $order instanceof WC_Order ) {
         spot_admin_order_box( spot_woo_license_data( $order ) );
     }
@@ -722,7 +924,7 @@ function spot_woo_admin_order_save( $oid ) {
     }
     if ( ! empty( $_POST['spot-remove'] ) ) {
         $ord->delete_meta_data( '_spotplayer_data' );
-        $ord->save_meta_data();
+        $ord->save();
         $ord->add_order_note( 'اطلاعات لایسنس اسپات پلیر حذف شد.' );
 
         return;
@@ -746,10 +948,11 @@ function spot_woo_admin_order_save( $oid ) {
             }
             $id = $rep['_id'];
             $ord->update_meta_data( '_spotplayer_data', $rep );
-            $ord->save_meta_data();
+            $ord->save();
             $ord->add_order_note( $note = sprintf( 'اطلاعات لایسنس %s دریافت شد.',
                 '<a href="https://panel.spotplayer.ir/license/edit/' . $id . '" target="_blank">' . $id . '</a>' ) );
-            spot_admin_notice( $note . ' <a href="' . get_edit_post_link( $ord->get_id() ) . '">' . 'سفارش ' . $ord->get_id() . '</a>',
+            $edit_url = spot_get_order_edit_url( $ord );
+            spot_admin_notice( $note . ( $edit_url ? ' <a href="' . esc_url( $edit_url ) . '">' . 'سفارش ' . $ord->get_id() . '</a>' : '' ),
                 'info' );
         } catch ( Exception $ex ) {
             spot_admin_notice( 'هنگام دریافت لایسنس  ' . $ex->getMessage() );
@@ -771,7 +974,7 @@ function spot_woo_admin_order_save( $oid ) {
                         } ) )
                     ]
                 ] ) );
-                $ord->save_meta_data();
+                $ord->save();
                 spot_woo_order_license_request( $ord, true );
             } catch ( Exception $ex ) {
                 spot_admin_notice( 'هنگام ایجاد لایسنس  ' . $ex->getMessage() );
@@ -953,29 +1156,50 @@ function spot_woo_shop_order_legacy( WC_Order $ord ): bool { // Compatibility Co
     return $legacy;
 }
 
+/**
+ * WooCommerce statuses that may still surface stored licenses.
+ *
+ * @return string[]
+ */
+function spot_woo_license_view_statuses(): array {
+    return [ 'processing', 'completed', 'partial-payment', 'partially-paid' ];
+}
+
 function spot_woo_shortcode() {
     $uid = get_current_user_id();
     $o   = absint( $_GET['spo'] ?? 0 );
+    $ord = null;
 
-    if ( ! $uid || ( $o && ( $ord = wc_get_order( $o ) ) && $ord->get_customer_id() !== $uid ) ) {
+    if ( ! $uid ) {
         return '<script type="application/javascript">window.location.href = "' . esc_url( get_home_url() ) . '"</script>';
     }
 
+    if ( $o ) {
+        $ord = wc_get_order( $o );
+        if ( ! $ord || (int) $ord->get_customer_id() !== $uid || ! in_array( $ord->get_status(), spot_woo_license_view_statuses(), true ) ) {
+            return '<script type="application/javascript">window.location.href = "' . esc_url( get_home_url() ) . '"</script>';
+        }
+    }
+
     ob_start();
-    if ( isset( $ord ) && $ord ) {
-        $spp = absint( $_GET['spp'] ?? 0 );
-        $spc = sanitize_text_field( $_GET['spc'] ?? '' );
-        $product = wc_get_product( $spp );
+    if ( $ord ) {
+        $spp          = absint( $_GET['spp'] ?? 0 );
+        $spc          = sanitize_text_field( wp_unslash( $_GET['spc'] ?? '' ) );
+        $product      = $spp ? wc_get_product( $spp ) : null;
         $product_name = $product ? $product->get_name() : '';
         spot_shop_success( $ord->get_meta( '_spotplayer_data' ), $product_name, $spc );
     } else { ?>
         <div id="sp_courses">
-            <?php foreach ( wc_get_orders( [ 'customer' => $uid, 'limit' => -1 ] ) as $ord ) {
-                $license_meta = $ord->get_meta( '_spotplayer_data' );
+            <?php foreach ( wc_get_orders( [
+                'customer' => $uid,
+                'limit'    => -1,
+                'status'   => spot_woo_license_view_statuses(),
+            ] ) as $order_row ) {
+                $license_meta = $order_row->get_meta( '_spotplayer_data' );
                 if ( is_array( $license_meta ) && ! empty( $license_meta['_id'] ) ) {
-                    foreach ( spot_woo_order_items( $ord, true ) as $p ) { ?>
+                    foreach ( spot_woo_order_items( $order_row, true ) as $p ) { ?>
                         <a href="<?= esc_url( add_query_arg( [
-                            'spo' => $ord->get_id(),
+                            'spo' => $order_row->get_id(),
                             'spp' => $p->get_id(),
                             'spc' => $p->get_meta( '_spotplayer_course' ),
                         ] ) ) ?>"><?= $p->get_image() ?>
@@ -1041,17 +1265,34 @@ function spot_edd_shortcode() {
     $uid = get_current_user_id();
     $o   = absint( $_GET['spo'] ?? 0 );
 
-    if ( ! $uid || ( $o && ( intval( edd_get_payment_customer_id( $o ) ) !== $uid ) ) ) {
+    if ( ! $uid ) {
         return '<script type="application/javascript">window.location.href = "' . esc_url( get_home_url() ) . '"</script>';
     }
 
-    ob_start();
     if ( $o ) {
-        $spc = sanitize_text_field( $_GET['spc'] ?? '' );
-        spot_shop_success( edd_get_payment( $o )->get_meta( '_spot_data' ), get_the_title( $o ), $spc );
-    } else { ?>
+        $pay = edd_get_payment( $o );
+        if ( ! $pay || (int) edd_get_payment_user_id( $pay->ID ) !== $uid || edd_get_payment_status( $pay ) !== 'complete' ) {
+            return '<script type="application/javascript">window.location.href = "' . esc_url( get_home_url() ) . '"</script>';
+        }
+        $spc = sanitize_text_field( wp_unslash( $_GET['spc'] ?? '' ) );
+        ob_start();
+        spot_shop_success( $pay->get_meta( '_spot_data' ), get_the_title( $pay->ID ), $spc );
+
+        return ob_get_clean();
+    }
+
+    ob_start();
+    ?>
         <div id="sp_courses">
-            <?php foreach ( edd_get_payments( [ 'user' => $uid, 'output' => 'payments', 'number' => -1 ] ) as $pay ) {
+            <?php foreach ( edd_get_payments( [
+                'user'   => $uid,
+                'status' => 'publish',
+                'output' => 'payments',
+                'number' => -1,
+            ] ) as $pay ) {
+                if ( edd_get_payment_status( $pay ) !== 'complete' ) {
+                    continue;
+                }
                 $license_meta = $pay->get_meta( '_spot_data' );
                 if ( is_array( $license_meta ) && ! empty( $license_meta['_id'] ) ) {
                     foreach ( spot_edd_payment_items( $pay, true ) as $d ) { ?>
@@ -1067,7 +1308,7 @@ function spot_edd_shortcode() {
                 }
             } ?>
         </div>
-    <?php }
+    <?php
 
     return ob_get_clean();
 }
@@ -1086,11 +1327,15 @@ function spot_shop_success( $data, $product = '', $course = null ) {
 
     $sp     = spot_get_settings();
     $domain = ! empty( $sp['domain'] ) ? $sp['domain'] : 'app.spotplayer.ir';
-    $domain = preg_replace( '/[^a-z0-9.\-]/i', '', $domain );
-    if ( ! $domain ) {
+    $domain = preg_replace( '/[^a-z0-9.\-]/i', '', (string) $domain );
+    if ( ! $domain || ! preg_match( '/^app[0-9]?(\.[a-z0-9\-]+){2,}$/i', $domain ) ) {
         $domain = 'app.spotplayer.ir';
     }
     $plugin_url = plugin_dir_url( __FILE__ );
+    $home_path  = (string) ( parse_url( get_home_url(), PHP_URL_PATH ) ?? '' );
+    $spotx_path = ( ( $home_path === '' || $home_path === '/' ) ? '' : rtrim( $home_path, '/' ) ) . '/spotx';
+    $license_id = preg_match( '/^[0-9a-f]{24}$/i', (string) ( $data['_id'] ?? '' ) ) ? (string) $data['_id'] : '';
+    $course_id  = preg_match( '/^[0-9a-f]{24}$/i', (string) $course ) ? (string) $course : null;
     ?>
     <script type="application/javascript">
         function copy(txt, lbl) {
@@ -1120,6 +1365,18 @@ function spot_shop_success( $data, $product = '', $course = null ) {
             el.className = el.className === 'active' ? '' : 'active';
         }
 
+        function spotSafePath(path) {
+            return typeof path === 'string' && /^\/[A-Za-z0-9._\-\/]*$/.test(path);
+        }
+
+        function spotSafeId(id) {
+            return typeof id === 'string' && /^[0-9a-f]{24}$/i.test(id);
+        }
+
+        function spotSafeType(type) {
+            return typeof type === 'string' && /^[a-z0-9_\-]{1,32}$/i.test(type) ? type : 'file';
+        }
+
         /** @type {[{name: string, file: string, image: string, version: number, disable: boolean}]} */
         var spotplayer_players;
         /** @type {[{_id: string, name: string, items: [{_id: string, type: string, name: string, desc: string}]}]} */
@@ -1139,8 +1396,8 @@ function spot_shop_success( $data, $product = '', $course = null ) {
                 <script src="https://<?= esc_attr( $domain ) ?>/assets/js/app-api.js"></script>
                 <script type="application/javascript">
                     (async function () {
-                        (new SpotPlayer(document.getElementById('spotplayer'), '<?= esc_js( parse_url( get_home_url(), PHP_URL_PATH ) ) ?>/spotx'))
-                            .Open('<?= esc_js( $data['key'] ?? '' ) ?>', <?= preg_match( '/^[0-9a-f]{24}$/i', (string) $course ) ? "'" . esc_js( $course ) . "'" : 'null' ?>);
+                        (new SpotPlayer(document.getElementById('spotplayer'), <?= wp_json_encode( $spotx_path ) ?>))
+                            .Open(<?= wp_json_encode( (string) ( $data['key'] ?? '' ) ) ?>, <?= wp_json_encode( $course_id ) ?>);
                     })();
                 </script>
             </div>
@@ -1154,7 +1411,9 @@ function spot_shop_success( $data, $product = '', $course = null ) {
                 <div id="sp_players">
                     <h3><b>❶</b> دانلود و نصب پلیر</h3>
                     <div id="sp_players_list">
-                        <script src="https://<?= esc_attr( $domain ) ?>/player/?f=js&l=<?= esc_attr( $data['_id'] ?? '' ) ?>"></script>
+                        <?php if ( $license_id ) { ?>
+                        <script src="https://<?= esc_attr( $domain ) ?>/player/?f=js&l=<?= esc_attr( $license_id ) ?>"></script>
+                        <?php } ?>
                         <script type="application/javascript">
                             (function () {
                                 var root = document.getElementById('sp_players_list');
@@ -1162,15 +1421,32 @@ function spot_shop_success( $data, $product = '', $course = null ) {
                                     return;
                                 }
                                 var domain = <?= wp_json_encode( $domain ) ?>;
-                                root.insertAdjacentHTML('beforeend', window.spotplayer_players.map(function (p) {
-                                    return [
-                                        '<a target="_blank" ' + (p.file ? ('href="https://' + domain + p.file + '"') : '') + ' class="' + (p.disable ? 'disable' : '') + '">',
-                                        ' <img alt="' + p.name + '" src="https://' + domain + p.image + '">',
-                                        ' <b>' + p.name + '</b>',
-                                        ' <u>' + (p.file ? p.version : 'به زودی') + '</u>',
-                                        '</a>'
-                                    ].join('');
-                                }).join(''));
+                                window.spotplayer_players.forEach(function (p) {
+                                    if (!p || typeof p !== 'object') {
+                                        return;
+                                    }
+                                    var a = document.createElement('a');
+                                    a.target = '_blank';
+                                    if (p.disable) {
+                                        a.className = 'disable';
+                                    }
+                                    if (p.file && spotSafePath(p.file)) {
+                                        a.href = 'https://' + domain + p.file;
+                                    }
+                                    var img = document.createElement('img');
+                                    img.alt = String(p.name || '');
+                                    if (p.image && spotSafePath(p.image)) {
+                                        img.src = 'https://' + domain + p.image;
+                                    }
+                                    var b = document.createElement('b');
+                                    b.textContent = String(p.name || '');
+                                    var u = document.createElement('u');
+                                    u.textContent = p.file ? String(p.version || '') : 'به زودی';
+                                    a.appendChild(img);
+                                    a.appendChild(b);
+                                    a.appendChild(u);
+                                    root.appendChild(a);
+                                });
                             })();
                         </script>
                     </div>
@@ -1179,13 +1455,13 @@ function spot_shop_success( $data, $product = '', $course = null ) {
                 <div id="sp_license">
                     <h3><b>❷</b> کپی و وارد نمودن کلید در پلیر</h3>
                     <textarea readonly><?= esc_textarea( $data['key'] ?? '' ) ?></textarea>
-                    <button class="sp_color_back" onclick="copy('<?= esc_js( $data['key'] ?? '' ) ?>', 'کلید لایسنس')">کپی کلید</button>
+                    <button class="sp_color_back" type="button" onclick="copy(<?= esc_attr( wp_json_encode( (string) ( $data['key'] ?? '' ) ) ) ?>, 'کلید لایسنس')">کپی کلید</button>
                 </div>
 
-                <?php if ( ! empty( $sp['download'] ) && ! empty( $data['_id'] ) && ! empty( $data['key'] ) ) { ?>
+                <?php if ( ! empty( $sp['download'] ) && $license_id && ! empty( $data['key'] ) ) { ?>
                     <?php
-                    $key_bin = @hex2bin( substr( $data['key'], 24, 64 ) );
-                    $burl    = $key_bin ? ( 'https://' . $domain . '/' . $data['_id'] . '/' . md5( $key_bin ) . '/' ) : '';
+                    $key_bin = @hex2bin( substr( (string) $data['key'], 24, 64 ) );
+                    $burl    = $key_bin ? ( 'https://' . $domain . '/' . $license_id . '/' . md5( $key_bin ) . '/' ) : '';
                     if ( $burl ) :
                         ?>
                     <div id="sp_videos">
@@ -1203,20 +1479,41 @@ function spot_shop_success( $data, $product = '', $course = null ) {
                                     var burl = <?= wp_json_encode( $burl ) ?>;
                                     var down = <?= wp_json_encode( $plugin_url . 'down.svg' ) ?>;
                                     var dl = <?= wp_json_encode( $plugin_url . 'dl.svg' ) ?>;
-                                    root.insertAdjacentHTML('beforeend', window.spotplayer_courses.map(function (c) {
-                                        return [
-                                            '<li><h4 onclick="toggle(this.parentNode)">',
-                                            '<img src="' + down + '">' + c.name,
-                                            '</h4><ul>',
-                                            (c.items || []).map(function (v) {
-                                                return [
-                                                    '<li class="sp_' + v.type + '"><a href="' + burl + c._id + '/' + v._id + '.spot">',
-                                                    '<img src="' + dl + '" />' + v.name,
-                                                    '</a></li>'].join('');
-                                            }).join(''),
-                                            '</ul></li>'
-                                        ].join('');
-                                    }).join(''));
+                                    window.spotplayer_courses.forEach(function (c) {
+                                        if (!c || !spotSafeId(c._id)) {
+                                            return;
+                                        }
+                                        var li = document.createElement('li');
+                                        var h4 = document.createElement('h4');
+                                        h4.addEventListener('click', function () {
+                                            toggle(li);
+                                        });
+                                        var downImg = document.createElement('img');
+                                        downImg.src = down;
+                                        downImg.alt = '';
+                                        h4.appendChild(downImg);
+                                        h4.appendChild(document.createTextNode(String(c.name || '')));
+                                        var ul = document.createElement('ul');
+                                        (c.items || []).forEach(function (v) {
+                                            if (!v || !spotSafeId(v._id)) {
+                                                return;
+                                            }
+                                            var itemLi = document.createElement('li');
+                                            itemLi.className = 'sp_' + spotSafeType(v.type);
+                                            var a = document.createElement('a');
+                                            a.href = burl + c._id + '/' + v._id + '.spot';
+                                            var dlImg = document.createElement('img');
+                                            dlImg.src = dl;
+                                            dlImg.alt = '';
+                                            a.appendChild(dlImg);
+                                            a.appendChild(document.createTextNode(String(v.name || '')));
+                                            itemLi.appendChild(a);
+                                            ul.appendChild(itemLi);
+                                        });
+                                        li.appendChild(h4);
+                                        li.appendChild(ul);
+                                        root.appendChild(li);
+                                    });
                                 })();
                             </script>
                         </ul>
@@ -1270,12 +1567,37 @@ function spot_woo_order_items( ?WC_Order $order, $products = false ): array {
     return $result;
 }
 
-function spot_check_order_has_any_license( int $oder_id ) {
-    global $wpdb;
+/**
+ * Find a SpotPlayer license id mentioned in order notes (HPOS-safe).
+ */
+function spot_check_order_has_any_license( int $order_id ) {
+    if ( $order_id <= 0 ) {
+        return '';
+    }
 
+    // Prefer WC CRUD notes API (works with HPOS and classic storage).
+    if ( function_exists( 'wc_get_order_notes' ) ) {
+        $notes = wc_get_order_notes( [
+            'order_id' => $order_id,
+            'limit'    => 50,
+            'orderby'  => 'date_created',
+            'order'    => 'DESC',
+        ] );
+        foreach ( (array) $notes as $note ) {
+            $content = is_object( $note ) ? ( $note->content ?? '' ) : '';
+            if ( is_string( $content ) && preg_match( '#license/edit/+([^/\'"\s]+)#i', $content, $matches ) ) {
+                return $matches[1] ?? '';
+            }
+        }
+
+        return '';
+    }
+
+    // Legacy fallback for very old WooCommerce.
+    global $wpdb;
     $note = $wpdb->get_var( $wpdb->prepare(
         "SELECT comment_content FROM $wpdb->comments WHERE comment_post_ID = %d AND comment_type = 'order_note' AND comment_content LIKE %s ORDER BY comment_ID DESC LIMIT 1",
-        $oder_id,
+        $order_id,
         '%license/edit/%'
     ) );
 
@@ -1306,27 +1628,46 @@ function spot_woo_order_license_request( WC_Order $ord, $admin = false ): ?array
         return null;
     }
 
+    $lock_key = 'spot_lic_lock_woo_' . $ord->get_id();
+    if ( ! spot_acquire_license_lock( $lock_key ) ) {
+        $fresh = $ord->get_meta( '_spotplayer_data' );
+        if ( is_array( $fresh ) && ! empty( $fresh['_id'] ) ) {
+            return $fresh;
+        }
+        throw new Exception( 'درخواست ساخت لایسنس در حال پردازش است. لطفا چند لحظه دیگر تلاش کنید.', 999 );
+    }
+
     try {
+        // Re-read under lock to avoid duplicate remote create races.
+        $ord  = wc_get_order( $ord->get_id() ) ?: $ord;
+        $data = spot_woo_license_data( $ord );
+        if ( ! empty( $data['_id'] ) ) {
+            return $data;
+        }
+
         $rep = spot_request_license_put( array_merge( $data,
             [ 'course' => $courses, 'payload' => strval( $ord->get_id() ) ] ) );
-        if ( empty( $rep['_id'] ) ) {
+        if ( empty( $rep['_id'] ) || ! preg_match( '/^[0-9a-f]{24}$/i', (string) $rep['_id'] ) ) {
             throw new Exception( '999' );
         }
-        $id   = $rep['_id'];
+        $id   = (string) $rep['_id'];
         $data = array_merge( $data, $rep );
         $ord->update_meta_data( '_spotplayer_data', $data );
-        $ord->save_meta_data();
+        $ord->save();
         $ord->add_order_note( sprintf( 'لایسنس  با شناسه %s برای این سفارش ایجاد شد.',
-            '<a href="https://panel.spotplayer.ir/license/edit/' . $id . '" target="_blank">' . $id . '</a>' ) );
+            '<a href="https://panel.spotplayer.ir/license/edit/' . esc_attr( $id ) . '" target="_blank">' . esc_html( $id ) . '</a>' ) );
 
         return $data;
 
     } catch ( Exception $ex ) {
-        $err = sprintf( 'خطای %s هنگام ایجاد لایسنس روی داد.', '<b>«' . $ex->getMessage() . '»</b>' );
-        $ord->add_order_note( $err . ( ( (int) $ex->getCode() === 999 ) ? ' <a target="_blank" href="' . parse_url( get_home_url(),
-                PHP_URL_PATH ) . '/spdeb?id=' . $ord->get_id() . '">' . 'اطلاعات دیباگ' . '</a>' : '' ) );
-        spot_admin_notice( $err . ' <a href="' . get_edit_post_link( $ord->get_id() ) . '">' . 'سفارش ' . $ord->get_id() . '</a>' );
-        throw new Exception( $err );
+        $safe_msg = spot_sanitize_remote_message( $ex->getMessage() );
+        $err      = sprintf( 'خطای %s هنگام ایجاد لایسنس روی داد.', '<b>«' . esc_html( $safe_msg ) . '»</b>' );
+        $ord->add_order_note( $err . ( ( (int) $ex->getCode() === 999 ) ? ' <a target="_blank" href="' . esc_url( spot_debug_url( $ord->get_id() ) ) . '">' . 'اطلاعات دیباگ' . '</a>' : '' ) );
+        $edit_url = spot_get_order_edit_url( $ord );
+        spot_admin_notice( $err . ( $edit_url ? ' <a href="' . esc_url( $edit_url ) . '">' . 'سفارش ' . $ord->get_id() . '</a>' : '' ) );
+        throw new Exception( wp_strip_all_tags( $err ), (int) $ex->getCode() );
+    } finally {
+        spot_release_license_lock( $lock_key );
     }
 }
 
@@ -1368,7 +1709,7 @@ function spot_woo_license_data_eval( ?WC_Order $order ): ?array { // dont rename
         }
     }
 
-    return @eval( "return " . spot_license_code() . ";" );
+    return spot_eval_license_code( compact( 'order', 'user' ) );
 }
 
 // EDD FUNCS ------------------------------------------------------------------------------------------------------------------
@@ -1407,27 +1748,44 @@ function spot_edd_payment_license_request( EDD_Payment $pay, $admin = false ): ?
         }
     }
 
+    $lock_key = 'spot_lic_lock_edd_' . $pay->ID;
+    if ( ! spot_acquire_license_lock( $lock_key ) ) {
+        $fresh = $pay->get_meta( '_spot_data' );
+        if ( is_array( $fresh ) && ! empty( $fresh['_id'] ) ) {
+            return $fresh;
+        }
+        throw new Exception( 'درخواست ساخت لایسنس در حال پردازش است. لطفا چند لحظه دیگر تلاش کنید.', 999 );
+    }
+
     try {
+        $pay  = edd_get_payment( $pay->ID ) ?: $pay;
+        $data = spot_edd_license_data( $pay );
+        if ( ! empty( $data['_id'] ) ) {
+            return $data;
+        }
+
         $rep = spot_request_license_put( array_merge( $data,
             [ 'course' => $courses, 'payload' => strval( $pay->ID ) ] ) );
-        if ( empty( $rep['_id'] ) ) {
+        if ( empty( $rep['_id'] ) || ! preg_match( '/^[0-9a-f]{24}$/i', (string) $rep['_id'] ) ) {
             throw new Exception( '999' );
         }
-        $id   = $rep['_id'];
+        $id   = (string) $rep['_id'];
         $data = array_merge( $data, $rep );
         $pay->update_meta( '_spot_data', $data );
         edd_insert_payment_note( $pay->ID, sprintf( 'لایسنس  با شناسه %s برای این سفارش ایجاد شد.',
-            '<a href="https://panel.spotplayer.ir/license/edit/' . $id . '" target="_blank">' . $id . '</a>' ) );
+            '<a href="https://panel.spotplayer.ir/license/edit/' . esc_attr( $id ) . '" target="_blank">' . esc_html( $id ) . '</a>' ) );
 
         return $data;
 
     } catch ( Exception $ex ) {
-        $err = sprintf( 'خطای %s هنگام ایجاد لایسنس روی داد.', '<b>«' . $ex->getMessage() . '»</b>' );
+        $safe_msg = spot_sanitize_remote_message( $ex->getMessage() );
+        $err      = sprintf( 'خطای %s هنگام ایجاد لایسنس روی داد.', '<b>«' . esc_html( $safe_msg ) . '»</b>' );
         edd_insert_payment_note( $pay->ID,
-            $err . ( ( (int) $ex->getCode() === 999 ) ? ' <a target="_blank" href="' . parse_url( get_home_url(),
-                    PHP_URL_PATH ) . '/spdeb?id=' . $pay->ID . '">' . 'اطلاعات دیباگ' . '</a>' : '' ) );
-        spot_admin_notice( $err . ' <a href="' . get_edit_post_link( $pay->ID ) . '">' . 'سفارش ' . $pay->ID . '</a>' );
-        throw new Exception( $err );
+            $err . ( ( (int) $ex->getCode() === 999 ) ? ' <a target="_blank" href="' . esc_url( spot_debug_url( (int) $pay->ID ) ) . '">' . 'اطلاعات دیباگ' . '</a>' : '' ) );
+        spot_admin_notice( $err . ' <a href="' . esc_url( get_edit_post_link( $pay->ID ) ) . '">' . 'سفارش ' . $pay->ID . '</a>' );
+        throw new Exception( wp_strip_all_tags( $err ), (int) $ex->getCode() );
+    } finally {
+        spot_release_license_lock( $lock_key );
     }
 }
 
@@ -1473,7 +1831,7 @@ function spot_edd_license_data_eval( ?EDD_Payment $payment ) { // dont rename $p
     /** @noinspection PhpUnusedLocalVariableInspection */
     $user = get_userdata( edd_get_payment_user_id( $payment->ID ) );
 
-    return @eval( "return " . spot_license_code() . ";" );
+    return spot_eval_license_code( compact( 'payment', 'user' ) );
 }
 
 // FUNCS ------------------------------------------------------------------------------------------------------------------
@@ -1481,8 +1839,53 @@ function spot_woo_or_edd(): int {
     return function_exists( 'wc_get_orders' ) ? 1 : ( function_exists( 'edd_get_payments' ) ? 2 : 0 );
 }
 
+/**
+ * Evaluate configured license builder snippet with controlled errors/return shape.
+ *
+ * @param array<string, mixed> $context Variables traditionally available to custom snippets ($order/$payment/$user).
+ * @return array<string, mixed>|null
+ */
+function spot_eval_license_code( array $context = [] ): ?array {
+    if ( $context ) {
+        extract( $context, EXTR_SKIP );
+    }
+
+    try {
+        $result = eval( 'return ' . spot_license_code() . ';' );
+    } catch ( Throwable $e ) {
+        return null;
+    }
+
+    return is_array( $result ) ? $result : null;
+}
+
+function spot_acquire_license_lock( string $key ): bool {
+    if ( get_transient( $key ) ) {
+        return false;
+    }
+
+    return set_transient( $key, 1, 30 );
+}
+
+function spot_release_license_lock( string $key ): void {
+    delete_transient( $key );
+}
+
+function spot_sanitize_remote_message( $message ): string {
+    $message = wp_strip_all_tags( (string) $message );
+    $message = preg_replace( '/\s+/', ' ', $message );
+    $message = trim( (string) $message );
+
+    return function_exists( 'mb_substr' ) ? mb_substr( $message, 0, 300 ) : substr( $message, 0, 300 );
+}
+
 /** @throws Exception */
 function spot_request_license_get( $id ) {
+    $id = sanitize_text_field( (string) $id );
+    if ( ! preg_match( '/^[0-9a-f]{24}$/i', $id ) ) {
+        throw new Exception( 'شناسه لایسنس نامعتبر است.' );
+    }
+
     return spot_request( 'https://panel.spotplayer.ir/license/edit/' . $id . '?d=1' );
 }
 
@@ -1501,6 +1904,15 @@ function spot_request_license_put( $j ) {
         array_merge( $j, [ 'test' => ! empty( $settings['test'] ) ? 1 : 0 ] ) );
 }
 
+/**
+ * Backward-compatible alias for older integrations.
+ *
+ * @throws Exception
+ */
+function spot_request_license_insert( $j ) {
+    return spot_request_license_put( $j );
+}
+
 /** @throws Exception */
 function spot_request( string $url, $data = [] ) {
     $settings = spot_get_settings();
@@ -1511,35 +1923,53 @@ function spot_request( string $url, $data = [] ) {
         '$API'         => $api_key,
         'X-WpSpot'     => SPOT_VERSION,
     ];
-    $is_post  = ! empty( $data );
+    $is_post   = ! empty( $data );
     $body_json = $is_post ? wp_json_encode( $data, JSON_UNESCAPED_UNICODE ) : null;
+    $status    = 0;
+    $body      = '';
 
     if ( function_exists( 'wp_remote_request' ) ) {
         $args = [
-            'method'    => $is_post ? 'POST' : 'GET',
-            'headers'   => $headers,
-            'sslverify' => false,
-            'timeout'   => 15,
+            'method'      => $is_post ? 'POST' : 'GET',
+            'headers'     => $headers,
+            'sslverify'   => true,
+            'timeout'     => 15,
+            'redirection' => 0,
         ];
         if ( $is_post ) {
             $args['body'] = $body_json;
         }
         $response = wp_remote_request( $url, $args );
         if ( is_wp_error( $response ) ) {
-            throw new Exception( $response->get_error_message() );
+            throw new Exception( spot_sanitize_remote_message( $response->get_error_message() ) );
         }
-        $body = wp_remote_retrieve_body( $response );
+        $status = (int) wp_remote_retrieve_response_code( $response );
+        $body   = (string) wp_remote_retrieve_body( $response );
     } elseif ( class_exists( 'WpOrg\Requests\Requests' ) ) {
-        $res  = \WpOrg\Requests\Requests::request( $url, $headers, $body_json, $is_post ? 'POST' : 'GET', [ 'verify' => false, 'verifyname' => false ] );
-        $body = $res->body;
+        $res    = \WpOrg\Requests\Requests::request( $url, $headers, $body_json, $is_post ? 'POST' : 'GET', [
+            'verify'     => true,
+            'verifyname' => true,
+            'timeout'    => 15,
+        ] );
+        $status = (int) $res->status_code;
+        $body   = (string) $res->body;
     } elseif ( class_exists( 'Requests' ) ) {
-        $res  = Requests::request( $url, $headers, $body_json, $is_post ? 'POST' : 'GET', [ 'verify' => false, 'verifyname' => false ] );
-        $body = $res->body;
+        $res    = Requests::request( $url, $headers, $body_json, $is_post ? 'POST' : 'GET', [
+            'verify'     => true,
+            'verifyname' => true,
+            'timeout'    => 15,
+        ] );
+        $status = (int) $res->status_code;
+        $body   = (string) $res->body;
     } else {
         throw new Exception( 'هیچ متد درخواست HTTP در دسترس نیست.' );
     }
 
-    if ( $body === '' || $body === null ) {
+    if ( $status && ( $status < 200 || $status >= 300 ) ) {
+        throw new Exception( 'پاسخ ناموفق از سرور اسپات پلیر دریافت شد (' . $status . ').' );
+    }
+
+    if ( $body === '' ) {
         throw new Exception( 'پاسخ خالی از سرور اسپات پلیر دریافت شد.' );
     }
 
@@ -1548,25 +1978,48 @@ function spot_request( string $url, $data = [] ) {
         throw new Exception( 'پاسخ نامعتبر از سرور اسپات پلیر دریافت شد.' );
     }
     if ( ! empty( $rep['ex']['msg'] ) ) {
-        throw new Exception( $rep['ex']['msg'] );
+        throw new Exception( spot_sanitize_remote_message( $rep['ex']['msg'] ) );
+    }
+    if ( isset( $rep['_id'] ) && ! preg_match( '/^[0-9a-f]{24}$/i', (string) $rep['_id'] ) ) {
+        throw new Exception( 'شناسه لایسنس دریافتی نامعتبر است.' );
     }
 
     return $rep;
 }
 
 function spot_admin_notice( $notice = '', $type = 'error', $dismissible = true ) {
-    $notices   = get_option( 'spotplayer_notices', [] );
-    $notices[] = [ 'notice' => $notice, 'type' => $type, 'dismissible' => $dismissible ? 'is-dismissible' : '' ];
-    update_option( "spotplayer_notices", $notices );
+    $allowed_types = [ 'error', 'warning', 'success', 'info', 'updated' ];
+    $type          = in_array( $type, $allowed_types, true ) ? $type : 'error';
+    $notices       = get_option( 'spotplayer_notices', [] );
+    if ( ! is_array( $notices ) ) {
+        $notices = [];
+    }
+    $notices[] = [
+        'notice'      => wp_kses( (string) $notice, [
+            'a' => [ 'href' => [], 'target' => [], 'rel' => [] ],
+            'b' => [],
+            'strong' => [],
+            'em' => [],
+            'code' => [],
+        ] ),
+        'type'        => $type,
+        'dismissible' => $dismissible ? 'is-dismissible' : '',
+    ];
+    update_option( 'spotplayer_notices', $notices );
 }
 
 function spot_admin_notices() {
     $notices = get_option( 'spotplayer_notices', [] );
+    if ( ! is_array( $notices ) ) {
+        return;
+    }
     foreach ( $notices as $n ) {
-        printf( '<div class="notice notice-%1$s %2$s"><p>%3$s</p></div>', esc_attr( $n['type'] ), esc_attr( $n['dismissible'] ), $n['notice'] );
+        $type = esc_attr( $n['type'] ?? 'error' );
+        $cls  = esc_attr( $n['dismissible'] ?? '' );
+        printf( '<div class="notice notice-%1$s %2$s"><p>%3$s</p></div>', $type, $cls, $n['notice'] ?? '' );
     }
     if ( ! empty( $notices ) ) {
-        delete_option( "spotplayer_notices" );
+        delete_option( 'spotplayer_notices' );
     }
 }
 

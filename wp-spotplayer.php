@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name: اسپات پلیر
- * Version: 17.1.1
+ * Version: 17.1.2
  * Description: ابتدا در تنظیمات اسپات پلیر کلید API و کد ساخت لایسنس و سپس شناسه دوره‌های هر محصول را وارد نمایید.
  * Author: SpotPlayer.ir
  * Author URI: https://spotplayer.ir/
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'SPOT_VERSION', '17.1.1' );
+define( 'SPOT_VERSION', '17.1.2' );
 
 /**
  * Declare compatibility with WooCommerce High-Performance Order Storage (HPOS).
@@ -66,6 +66,31 @@ function spot_user_can_edit_sensitive(): bool {
 }
 
 /**
+ * Read a scalar value from an untrusted array.
+ *
+ * @param mixed  $input
+ * @param string $key
+ * @return mixed
+ */
+function spot_scalar_input( $input, string $key ) {
+    return is_array( $input ) && isset( $input[ $key ] ) && is_scalar( $input[ $key ] )
+        ? $input[ $key ]
+        : null;
+}
+
+/**
+ * Check a checkbox-like setting without treating arrays as enabled.
+ *
+ * @param mixed  $input
+ * @param string $key
+ */
+function spot_checkbox_enabled( $input, string $key ): bool {
+    $value = spot_scalar_input( $input, $key );
+
+    return null !== $value && ! empty( $value );
+}
+
+/**
  * @return array<string, mixed>
  */
 function spot_get_settings(): array {
@@ -88,7 +113,8 @@ function spot_sanitize_settings( $input ): array {
     $out = $prev;
 
     if ( spot_user_can_edit_sensitive() ) {
-        $api = isset( $input['api'] ) ? sanitize_text_field( wp_unslash( $input['api'] ) ) : '';
+        $api_value = spot_scalar_input( $input, 'api' );
+        $api       = null !== $api_value ? sanitize_text_field( wp_unslash( $api_value ) ) : '';
         if ( $api === '' || preg_match( '/^(?:[A-Za-z0-9+\/]{4})*(?:[A-Za-z0-9+\/]{2}==|[A-Za-z0-9+\/]{3}=)?$/', $api ) ) {
             $out['api'] = $api;
         } else {
@@ -96,26 +122,30 @@ function spot_sanitize_settings( $input ): array {
             add_settings_error( 'spot_msgs', 'spot_api', 'فرمت کلید API نامعتبر بود و مقدار قبلی حفظ شد.', 'error' );
         }
 
-        $domain = isset( $input['domain'] ) ? sanitize_text_field( wp_unslash( $input['domain'] ) ) : '';
+        $domain_value = spot_scalar_input( $input, 'domain' );
+        $domain       = null !== $domain_value ? sanitize_text_field( wp_unslash( $domain_value ) ) : '';
         $out['domain'] = ( $domain !== '' && preg_match( '/^app[0-9]?(\.[a-z0-9\-]+){2,}$/', $domain ) ) ? $domain : '';
 
         // License builder snippet is evaluated server-side; only site admins may change it.
-        $out['code'] = isset( $input['code'] ) ? (string) wp_unslash( $input['code'] ) : '';
+        $code_value = spot_scalar_input( $input, 'code' );
+        $out['code'] = null !== $code_value ? (string) wp_unslash( $code_value ) : ( $prev['code'] ?? '' );
     } else {
         $out['api']    = $prev['api'] ?? '';
         $out['domain'] = $prev['domain'] ?? '';
         $out['code']   = $prev['code'] ?? '';
     }
 
-    $color = isset( $input['color'] ) ? sanitize_hex_color( wp_unslash( $input['color'] ) ) : '';
+    $color_value = spot_scalar_input( $input, 'color' );
+    $color       = null !== $color_value ? sanitize_hex_color( wp_unslash( $color_value ) ) : '';
     $out['color'] = $color ?: ( $prev['color'] ?? '#6611DD' );
 
     foreach ( [ 'test', 'completed', 'web', 'webonly', 'download', 'wccrs', 'wcspc' ] as $flag ) {
-        $out[ $flag ] = ! empty( $input[ $flag ] ) ? 1 : 0;
+        $out[ $flag ] = spot_checkbox_enabled( $input, $flag ) ? 1 : 0;
     }
 
-    if ( ! empty( $input['time'] ) ) {
-        $time_val    = absint( $input['time'] );
+    $time_input = spot_scalar_input( $input, 'time' );
+    if ( null !== $time_input && ! empty( $time_input ) ) {
+        $time_val    = absint( $time_input );
         $out['time'] = $time_val > 0 ? $time_val : ( ! empty( $prev['time'] ) ? (int) $prev['time'] : time() );
     } else {
         $out['time'] = 0;
@@ -139,7 +169,12 @@ function spot_request_path(): string {
     $path        = (string) ( parse_url( $request_uri, PHP_URL_PATH ) ?? '/' );
     $home_path   = (string) ( parse_url( get_home_url(), PHP_URL_PATH ) ?? '' );
 
-    if ( $home_path !== '' && $home_path !== '/' && strpos( $path, $home_path ) === 0 ) {
+    if (
+        $home_path !== '' &&
+        $home_path !== '/' &&
+        strpos( $path, $home_path ) === 0 &&
+        ( strlen( $path ) === strlen( $home_path ) || '/' === $path[ strlen( $home_path ) ] )
+    ) {
         $path = substr( $path, strlen( $home_path ) );
     }
 
@@ -166,9 +201,33 @@ function spot_is_valid_x_cookie( string $cookie ): bool {
     return (bool) preg_match( '/^[A-Za-z0-9+\/=_\-]{36,512}$/', $cookie );
 }
 
+/**
+ * Persist the SpotPlayer session cookie on all supported PHP versions.
+ */
+function spot_set_x_cookie( string $value ): void {
+    $host = parse_url( get_home_url(), PHP_URL_HOST );
+    $host = is_string( $host ) ? $host : '';
+    $args = [
+        'expires'  => time() + ( defined( 'YEAR_IN_SECONDS' ) ? YEAR_IN_SECONDS : 31536000 ),
+        'path'     => '/',
+        'domain'   => $host,
+        'secure'   => true,
+        'httponly' => false,
+        'samesite' => 'Lax',
+    ];
+
+    if ( PHP_VERSION_ID >= 70300 ) {
+        setcookie( 'X', $value, $args );
+    } else {
+        // The array form of setcookie() was added in PHP 7.3.
+        setcookie( 'X', $value, $args['expires'], '/', $host, true, false );
+    }
+}
+
 // SHOP ------------------------------------------------------------------------------------------------------------------
 function spot_shop_x() {
-    $cookie_x = (string) ( $_COOKIE['X'] ?? '' );
+    $cookie_value = isset( $_COOKIE['X'] ) && is_scalar( $_COOKIE['X'] ) ? $_COOKIE['X'] : '';
+    $cookie_x     = (string) $cookie_value;
     if ( ! spot_is_valid_x_cookie( $cookie_x ) ) {
         status_header( 204 );
         exit;
@@ -186,49 +245,46 @@ function spot_shop_x() {
     }
 
     $new_cookie = null;
-    if ( function_exists( 'wp_remote_head' ) ) {
-        $response = wp_remote_head( 'https://app.spotplayer.ir/', [
-            'headers'   => [ 'cookie' => 'X=' . $cookie_x ],
-            'sslverify' => true,
-            'timeout'   => 10,
-            'redirection' => 0,
-        ] );
-        if ( ! is_wp_error( $response ) ) {
-            $cookies = wp_remote_retrieve_cookies( $response );
-            foreach ( $cookies as $cookie ) {
-                if ( $cookie->name === 'X' && spot_is_valid_x_cookie( (string) $cookie->value ) ) {
-                    $new_cookie = $cookie->value;
-                    break;
+    try {
+        if ( function_exists( 'wp_remote_head' ) ) {
+            $response = wp_remote_head( 'https://app.spotplayer.ir/', [
+                'headers'     => [ 'cookie' => 'X=' . $cookie_x ],
+                'sslverify'   => true,
+                'timeout'     => 10,
+                'redirection' => 0,
+            ] );
+            if ( ! is_wp_error( $response ) ) {
+                $cookies = wp_remote_retrieve_cookies( $response );
+                foreach ( $cookies as $cookie ) {
+                    if ( $cookie->name === 'X' && spot_is_valid_x_cookie( (string) $cookie->value ) ) {
+                        $new_cookie = $cookie->value;
+                        break;
+                    }
                 }
             }
+        } elseif ( class_exists( 'WpOrg\Requests\Requests' ) ) {
+            $req = \WpOrg\Requests\Requests::head( 'https://app.spotplayer.ir/', [ 'cookie' => 'X=' . $cookie_x ], [
+                'verify'     => true,
+                'verifyname' => true,
+                'timeout'    => 10,
+            ] );
+            $candidate = isset( $req->cookies['X'] ) ? (string) $req->cookies['X'] : '';
+            $new_cookie = spot_is_valid_x_cookie( $candidate ) ? $candidate : null;
+        } elseif ( class_exists( 'Requests' ) ) {
+            $req = Requests::head( 'https://app.spotplayer.ir/', [ 'cookie' => 'X=' . $cookie_x ], [
+                'verify'     => true,
+                'verifyname' => true,
+                'timeout'    => 10,
+            ] );
+            $candidate = isset( $req->cookies['X'] ) ? (string) $req->cookies['X'] : '';
+            $new_cookie = spot_is_valid_x_cookie( $candidate ) ? $candidate : null;
         }
-    } elseif ( class_exists( 'WpOrg\Requests\Requests' ) ) {
-        $req = \WpOrg\Requests\Requests::head( 'https://app.spotplayer.ir/', [ 'cookie' => 'X=' . $cookie_x ], [
-            'verify'     => true,
-            'verifyname' => true,
-            'timeout'    => 10,
-        ] );
-        $candidate = isset( $req->cookies['X'] ) ? (string) $req->cookies['X'] : '';
-        $new_cookie = spot_is_valid_x_cookie( $candidate ) ? $candidate : null;
-    } elseif ( class_exists( 'Requests' ) ) {
-        $req = Requests::head( 'https://app.spotplayer.ir/', [ 'cookie' => 'X=' . $cookie_x ], [
-            'verify'     => true,
-            'verifyname' => true,
-            'timeout'    => 10,
-        ] );
-        $candidate = isset( $req->cookies['X'] ) ? (string) $req->cookies['X'] : '';
-        $new_cookie = spot_is_valid_x_cookie( $candidate ) ? $candidate : null;
+    } catch ( Throwable $e ) {
+        $new_cookie = null;
     }
 
     if ( $new_cookie ) {
-        setcookie( 'X', $new_cookie, [
-            'expires'  => time() + 9e9,
-            'path'     => '/',
-            'domain'   => (string) parse_url( get_home_url(), PHP_URL_HOST ),
-            'secure'   => true,
-            'httponly' => false,
-            'samesite' => 'Lax',
-        ] );
+        spot_set_x_cookie( $new_cookie );
     }
 
     status_header( 204 );
@@ -240,12 +296,14 @@ function spot_debug() {
         wp_die( 'Access denied', 403 );
     }
 
-    $id = absint( $_GET['id'] ?? 0 );
+    $id_value = isset( $_GET['id'] ) && is_scalar( $_GET['id'] ) ? $_GET['id'] : 0;
+    $id       = absint( $id_value );
     if ( ! $id ) {
         wp_die( 'شناسه سفارش نامعتبر است.', 400 );
     }
 
-    $nonce = sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ?? '' ) );
+    $nonce_value = isset( $_GET['_wpnonce'] ) && is_scalar( $_GET['_wpnonce'] ) ? $_GET['_wpnonce'] : '';
+    $nonce       = sanitize_text_field( wp_unslash( $nonce_value ) );
     if ( ! $nonce || ! wp_verify_nonce( $nonce, 'spot_debug_' . $id ) ) {
         wp_die( 'لینک دیباگ نامعتبر یا منقضی شده است.', 403 );
     }
@@ -257,7 +315,8 @@ function spot_debug() {
     header( 'Content-Type: application/json; charset=utf-8' );
     header( 'X-Content-Type-Options: nosniff' );
 
-    if ( spot_woo_or_edd() == 1 ) {
+    $platform = spot_woo_or_edd();
+    if ( $platform === 1 ) {
         $o = wc_get_order( $id );
         if ( ! $o ) {
             wp_die( 'سفارش یافت نشد.', 404 );
@@ -276,6 +335,10 @@ function spot_debug() {
             'license' => $o->get_meta( '_spotplayer_data' ),
         ];
         die( wp_json_encode( $payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT ) );
+    }
+
+    if ( $platform !== 2 ) {
+        wp_die( 'ووکامرس یا EDD فعال نیست.', 400 );
     }
 
     $p = edd_get_payment( $id );
@@ -355,7 +418,7 @@ function spot_plugin_action_links( $links, $file ) {
     if ( strpos( $file, 'spotplayer' ) !== false ) {
         array_unshift( $links,
             '<a href="' . admin_url( 'admin.php?page=spotplayer' ) . '">تنظیمات</a>',
-            '<a target="_blank" href="https://spotplayer.ir/help/api/wordpress">راهنما</a>' );
+            '<a target="_blank" rel="noopener noreferrer" href="https://spotplayer.ir/help/api/wordpress">راهنما</a>' );
     }
 
     return $links;
@@ -472,13 +535,29 @@ function spot_admin_page() {
                             <div style="direction: ltr">
                                 <?php
                                 try {
-                                    $j = spot_woo_or_edd() == 1 ? spot_woo_license_data_eval( @wc_get_orders( [ 'limit' => 1 ] )[0] ) : @spot_edd_license_data_eval( edd_get_payments( [ 'number' => 1 ] )[0] );
+                                    $j = null;
+                                    if ( $p === 1 ) {
+                                        $orders = wc_get_orders( [ 'limit' => 1 ] );
+                                        $j      = ! empty( $orders ) && $orders[0] instanceof WC_Order
+                                            ? spot_woo_license_data_eval( $orders[0] )
+                                            : null;
+                                    } elseif ( $p === 2 ) {
+                                        $payments = edd_get_payments( [ 'number' => 1 ] );
+                                        $j        = ! empty( $payments ) && $payments[0] instanceof EDD_Payment
+                                            ? spot_edd_license_data_eval( $payments[0] )
+                                            : null;
+                                    }
                                     if ( ! $j ) {
                                         echo '<div style="color: red; direction: rtl">هیچ سفارش فعالی وجود ندارد. برای تست لطفا یک سفارش ایجاد کنید.</div>';
                                     } else {
                                         echo '<pre>' . esc_html( wp_json_encode( $j, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT ) ) . '</pre>';
-                                        if ( empty( $j['name'] ) || empty( $j['watermark']['texts'][0]['text'] ) ) {
-                                            $id = spot_woo_or_edd() == 1 ? wc_get_orders( [ 'limit' => 1 ] )[0]->get_id() : edd_get_payments( [ 'number' => 1 ] )[0]->ID;
+                                        $watermark_text = isset( $j['watermark'] ) && is_array( $j['watermark'] ) &&
+                                            isset( $j['watermark']['texts'] ) && is_array( $j['watermark']['texts'] ) &&
+                                            isset( $j['watermark']['texts'][0] ) && is_array( $j['watermark']['texts'][0] )
+                                            ? ( $j['watermark']['texts'][0]['text'] ?? '' )
+                                            : '';
+                                        if ( empty( $j['name'] ) || empty( $watermark_text ) ) {
+                                            $id = $p === 1 ? $orders[0]->get_id() : $payments[0]->ID;
                                             $a  = '<div style="direction: rtl"><a target="_blank" href="' . esc_url( spot_debug_url( (int) $id ) ) . '">' . 'اطلاعات دیباگ' . '</a></div>';
                                             if ( empty( $j['name'] ) ) {
                                                 echo '<div style="color: red; direction: rtl">مقدار نام خالی است. لطفا از یک فیلد دیگر برای تعیین مقدار نام استفاده کنید.</div>' . $a;
@@ -693,7 +772,9 @@ function spot_admin_page() {
 
 function spot_admin_order_box( $data ) {
     $data    = is_array( $data ) ? $data : [];
-    $texts   = $data['watermark']['texts'] ?? [];
+    $texts   = isset( $data['watermark'] ) && is_array( $data['watermark'] ) && isset( $data['watermark']['texts'] ) && is_array( $data['watermark']['texts'] )
+        ? $data['watermark']['texts']
+        : [];
     $disable = ! empty( $data['_id'] ) ? 'disabled readonly' : '';
     wp_nonce_field( 'spot_order_license', 'spot_order_nonce' );
     ?>
@@ -763,7 +844,10 @@ function spot_woo_admin_product_panel() { ?>
 add_action( 'woocommerce_product_data_panels', 'spot_woo_admin_product_panel' );
 
 function spot_woo_admin_product_update( WC_Product $product ) {
-    spot_woo_admin_product_save( $product, wp_unslash( $_POST['_spotplayer_course'] ?? '' ) );
+    $course = isset( $_POST['_spotplayer_course'] ) && is_scalar( $_POST['_spotplayer_course'] )
+        ? wp_unslash( $_POST['_spotplayer_course'] )
+        : '';
+    spot_woo_admin_product_save( $product, $course );
 }
 
 add_action( 'woocommerce_admin_process_product_object', 'spot_woo_admin_product_update' );
@@ -785,7 +869,8 @@ add_action( 'woocommerce_product_after_variable_attributes', 'spot_woo_admin_var
 
 function spot_woo_admin_variation_update( WC_Product_Variation $variation, int $i ) {
     $courses = wp_unslash( $_POST['spotplayer_course'] ?? [] );
-    spot_woo_admin_product_save( $variation, is_array( $courses ) ? ( $courses[ $i ] ?? '' ) : '' );
+    $course  = is_array( $courses ) && isset( $courses[ $i ] ) && is_scalar( $courses[ $i ] ) ? $courses[ $i ] : '';
+    spot_woo_admin_product_save( $variation, $course );
 }
 
 add_action( 'woocommerce_admin_process_variation_object', 'spot_woo_admin_variation_update', 10, 2 );
@@ -794,7 +879,7 @@ function spot_woo_admin_product_save( $product, $course ) {
     if ( ! $product instanceof WC_Product || ! current_user_can( 'edit_product', $product->get_id() ) ) {
         return;
     }
-    $course = sanitize_text_field( $course );
+    $course = is_scalar( $course ) ? sanitize_text_field( $course ) : '';
     if ( preg_match( '/^[0-9a-f]{24}(,[0-9a-f]{24})*$/i', $course ) ) {
         $had_spot = (bool) $product->get_meta( '_spotplayer_course' );
         if ( ! $had_spot ) {
@@ -845,9 +930,11 @@ function spot_get_current_admin_order( $post_or_order_object = null ) {
     }
 
     // HPOS order editor: admin.php?page=wc-orders&action=edit&id=123
-    $page = isset( $_GET['page'] ) ? sanitize_text_field( wp_unslash( $_GET['page'] ) ) : '';
-    if ( $page === 'wc-orders' && ! empty( $_GET['id'] ) ) {
-        $order = wc_get_order( absint( $_GET['id'] ) );
+    $page_value = isset( $_GET['page'] ) && is_scalar( $_GET['page'] ) ? $_GET['page'] : '';
+    $page       = sanitize_text_field( wp_unslash( $page_value ) );
+    $order_id_value = isset( $_GET['id'] ) && is_scalar( $_GET['id'] ) ? $_GET['id'] : 0;
+    if ( $page === 'wc-orders' && ! empty( $order_id_value ) ) {
+        $order = wc_get_order( absint( $order_id_value ) );
         if ( $order instanceof WC_Order ) {
             return $order;
         }
@@ -911,7 +998,8 @@ function spot_woo_admin_order_save( $oid ) {
     if ( ! spot_user_can_manage() && ! current_user_can( 'edit_shop_orders' ) ) {
         return;
     }
-    if ( empty( $_POST['spot_order_nonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['spot_order_nonce'] ) ), 'spot_order_license' ) ) {
+    $nonce_value = isset( $_POST['spot_order_nonce'] ) && is_scalar( $_POST['spot_order_nonce'] ) ? $_POST['spot_order_nonce'] : '';
+    if ( '' === $nonce_value || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $nonce_value ) ), 'spot_order_license' ) ) {
         return;
     }
 
@@ -936,7 +1024,8 @@ function spot_woo_admin_order_save( $oid ) {
     }
 
     if ( ! empty( $_POST['spot-retrieve'] ) ) {
-        $id = sanitize_text_field( wp_unslash( $_POST['spot-id'] ?? '' ) );
+        $id_value = isset( $_POST['spot-id'] ) && is_scalar( $_POST['spot-id'] ) ? $_POST['spot-id'] : '';
+        $id       = sanitize_text_field( wp_unslash( $id_value ) );
         if ( ! preg_match( '/^[0-9a-f]{24}$/i', $id ) ) {
             return spot_admin_notice( 'شناسه لایسنس اسپات پلیر باید یک رشته هگز 24 کاراکتری باشد.', 'warning' );
         }
@@ -958,8 +1047,15 @@ function spot_woo_admin_order_save( $oid ) {
             spot_admin_notice( 'هنگام دریافت لایسنس  ' . $ex->getMessage() );
         }
     } elseif ( ! empty( $_POST['spot-create'] ) ) {
-        $n = sanitize_text_field( wp_unslash( $_POST['spot-name'] ?? '' ) );
-        $t = array_map( 'sanitize_text_field', wp_unslash( (array) ( $_POST['spot-text'] ?? [] ) ) );
+        $name_value = isset( $_POST['spot-name'] ) && is_scalar( $_POST['spot-name'] ) ? $_POST['spot-name'] : '';
+        $n          = sanitize_text_field( wp_unslash( $name_value ) );
+        $raw_texts  = isset( $_POST['spot-text'] ) && is_array( $_POST['spot-text'] ) ? wp_unslash( $_POST['spot-text'] ) : [];
+        $t          = array_map(
+            function ( $text ) {
+                return is_scalar( $text ) ? sanitize_text_field( $text ) : '';
+            },
+            $raw_texts
+        );
         if ( $n && ! empty( $t[0] ) ) {
             try {
                 $ord->update_meta_data( '_spotplayer_data', array_merge( $data, [
@@ -988,11 +1084,15 @@ function spot_woo_admin_order_save( $oid ) {
 add_action( 'woocommerce_process_shop_order_meta', 'spot_woo_admin_order_save', 10, 1 );
 
 // EDD ADMIN DOWNLOAD -----------------------------------------------------------------------------------------
-function spot_edd_admin_dl( $dl_id ) { ?>
+function spot_edd_admin_dl( $dl_id ) {
+    $stored_courses = get_post_meta( $dl_id, '_spot_course', true );
+    $stored_courses = is_array( $stored_courses )
+        ? implode( ',', array_map( 'strval', array_filter( $stored_courses, 'is_scalar' ) ) )
+        : ( is_scalar( $stored_courses ) ? (string) $stored_courses : '' );
+    ?>
     <div id="spot-course">
         <label for="course">شناسه دوره های اسپات پلیر</label>
-        <textarea id="course" name="spot_course"><?= esc_textarea( implode( ',',
-                get_post_meta( $dl_id, '_spot_course', true ) ?: [] ) ) ?></textarea>
+        <textarea id="course" name="spot_course"><?= esc_textarea( $stored_courses ) ?></textarea>
         <div>شناسه یک دوره یا چند دوره که با , از هم جدا شده اند.</div>
     </div>
 <?php }
@@ -1003,7 +1103,8 @@ function spot_edd_admin_dl_save( $dl_id ) {
     if ( ! current_user_can( 'edit_post', $dl_id ) ) {
         return;
     }
-    $raw_courses = sanitize_text_field( wp_unslash( $_POST['spot_course'] ?? '' ) );
+    $raw_course_value = isset( $_POST['spot_course'] ) && is_scalar( $_POST['spot_course'] ) ? $_POST['spot_course'] : '';
+    $raw_courses      = sanitize_text_field( wp_unslash( $raw_course_value ) );
     update_post_meta( $dl_id, '_spot_course', array_values( array_filter( array_map( 'trim', explode( ',', $raw_courses ) ), function ( $id ) {
         return (bool) preg_match( '/^[0-9a-f]{24}$/i', $id );
     } ) ) );
@@ -1025,7 +1126,8 @@ function spot_edd_admin_payment_save( int $pid ) {
     if ( ! spot_user_can_manage() && ! current_user_can( 'edit_shop_payments' ) ) {
         return;
     }
-    if ( empty( $_POST['spot_order_nonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['spot_order_nonce'] ) ), 'spot_order_license' ) ) {
+    $nonce_value = isset( $_POST['spot_order_nonce'] ) && is_scalar( $_POST['spot_order_nonce'] ) ? $_POST['spot_order_nonce'] : '';
+    if ( '' === $nonce_value || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $nonce_value ) ), 'spot_order_license' ) ) {
         return;
     }
 
@@ -1046,7 +1148,8 @@ function spot_edd_admin_payment_save( int $pid ) {
     }
 
     if ( ! empty( $_POST['spot-retrieve'] ) ) {
-        $id = sanitize_text_field( wp_unslash( $_POST['spot-id'] ?? '' ) );
+        $id_value = isset( $_POST['spot-id'] ) && is_scalar( $_POST['spot-id'] ) ? $_POST['spot-id'] : '';
+        $id       = sanitize_text_field( wp_unslash( $id_value ) );
         if ( ! preg_match( '/^[0-9a-f]{24}$/i', $id ) ) {
             return spot_admin_notice( 'شناسه لایسنس اسپات پلیر باید یه رشته هگز 24 کاراکتری باشد.', 'warning' );
         }
@@ -1067,8 +1170,15 @@ function spot_edd_admin_payment_save( int $pid ) {
             spot_admin_notice( 'هنگام دریافت لایسنس  خطای ' . $ex->getMessage() . ' روی داد.' );
         }
     } elseif ( ! empty( $_POST['spot-create'] ) ) {
-        $n = sanitize_text_field( wp_unslash( $_POST['spot-name'] ?? '' ) );
-        $t = array_map( 'sanitize_text_field', wp_unslash( (array) ( $_POST['spot-text'] ?? [] ) ) );
+        $name_value = isset( $_POST['spot-name'] ) && is_scalar( $_POST['spot-name'] ) ? $_POST['spot-name'] : '';
+        $n          = sanitize_text_field( wp_unslash( $name_value ) );
+        $raw_texts  = isset( $_POST['spot-text'] ) && is_array( $_POST['spot-text'] ) ? wp_unslash( $_POST['spot-text'] ) : [];
+        $t          = array_map(
+            function ( $text ) {
+                return is_scalar( $text ) ? sanitize_text_field( $text ) : '';
+            },
+            $raw_texts
+        );
         if ( $n && ! empty( $t[0] ) ) {
             try {
                 $pay->update_meta( '_spot_data', array_merge( $data, [
@@ -1167,7 +1277,8 @@ function spot_woo_license_view_statuses(): array {
 
 function spot_woo_shortcode() {
     $uid = get_current_user_id();
-    $o   = absint( $_GET['spo'] ?? 0 );
+    $o_value = isset( $_GET['spo'] ) && is_scalar( $_GET['spo'] ) ? $_GET['spo'] : 0;
+    $o       = absint( $o_value );
     $ord = null;
 
     if ( ! $uid ) {
@@ -1183,9 +1294,15 @@ function spot_woo_shortcode() {
 
     ob_start();
     if ( $ord ) {
-        $spp          = absint( $_GET['spp'] ?? 0 );
-        $spc          = sanitize_text_field( wp_unslash( $_GET['spc'] ?? '' ) );
-        $product      = $spp ? wc_get_product( $spp ) : null;
+        $spp_value    = isset( $_GET['spp'] ) && is_scalar( $_GET['spp'] ) ? $_GET['spp'] : 0;
+        $spc_value    = isset( $_GET['spc'] ) && is_scalar( $_GET['spc'] ) ? $_GET['spc'] : '';
+        $spp          = absint( $spp_value );
+        $spc          = sanitize_text_field( wp_unslash( $spc_value ) );
+        $product      = $spp ? spot_woo_order_product_for_course( $ord, $spp, $spc ) : null;
+        if ( $spp && ! $product ) {
+            ob_end_clean();
+            return '';
+        }
         $product_name = $product ? $product->get_name() : '';
         spot_shop_success( $ord->get_meta( '_spotplayer_data' ), $product_name, $spc );
     } else { ?>
@@ -1263,7 +1380,8 @@ add_action( 'edd_payment_receipt_after_table', 'spot_edd_shop_order', 10, 1 );
 
 function spot_edd_shortcode() {
     $uid = get_current_user_id();
-    $o   = absint( $_GET['spo'] ?? 0 );
+    $o_value = isset( $_GET['spo'] ) && is_scalar( $_GET['spo'] ) ? $_GET['spo'] : 0;
+    $o       = absint( $o_value );
 
     if ( ! $uid ) {
         return '<script type="application/javascript">window.location.href = "' . esc_url( get_home_url() ) . '"</script>';
@@ -1274,9 +1392,16 @@ function spot_edd_shortcode() {
         if ( ! $pay || (int) edd_get_payment_user_id( $pay->ID ) !== $uid || edd_get_payment_status( $pay ) !== 'complete' ) {
             return '<script type="application/javascript">window.location.href = "' . esc_url( get_home_url() ) . '"</script>';
         }
-        $spc = sanitize_text_field( wp_unslash( $_GET['spc'] ?? '' ) );
+        $spp_value = isset( $_GET['spp'] ) && is_scalar( $_GET['spp'] ) ? $_GET['spp'] : 0;
+        $spc_value = isset( $_GET['spc'] ) && is_scalar( $_GET['spc'] ) ? $_GET['spc'] : '';
+        $spp       = absint( $spp_value );
+        $spc       = sanitize_text_field( wp_unslash( $spc_value ) );
+        $item      = $spp ? spot_edd_payment_item_for_course( $pay, $spp, $spc ) : null;
+        if ( $spp && ! $item ) {
+            return '';
+        }
         ob_start();
-        spot_shop_success( $pay->get_meta( '_spot_data' ), get_the_title( $pay->ID ), $spc );
+        spot_shop_success( $pay->get_meta( '_spot_data' ), $item['name'] ?? '', $spc );
 
         return ob_get_clean();
     }
@@ -1325,8 +1450,8 @@ function spot_shop_success( $data, $product = '', $course = null ) {
         return;
     }
 
-    $sp     = spot_get_settings();
-    $domain = ! empty( $sp['domain'] ) ? $sp['domain'] : 'app.spotplayer.ir';
+    $sp          = spot_get_settings();
+    $domain      = isset( $sp['domain'] ) && is_scalar( $sp['domain'] ) ? (string) $sp['domain'] : 'app.spotplayer.ir';
     $domain = preg_replace( '/[^a-z0-9.\-]/i', '', (string) $domain );
     if ( ! $domain || ! preg_match( '/^app[0-9]?(\.[a-z0-9\-]+){2,}$/i', $domain ) ) {
         $domain = 'app.spotplayer.ir';
@@ -1535,7 +1660,7 @@ function spot_shortcode() {
 add_shortcode( 'spotplayer_courses', 'spot_shortcode' );
 
 // WOO FUNCS ------------------------------------------------------------------------------------------------------------------
-/** @return WC_Product[] */
+/** @return array<int, string>|WC_Product[] */
 function spot_woo_order_items( ?WC_Order $order, $products = false ): array {
     $result = [];
     if ( ! $order ) {
@@ -1553,18 +1678,58 @@ function spot_woo_order_items( ?WC_Order $order, $products = false ): array {
         }
 
         $licenses = $product->get_meta( '_spotplayer_course' );
-        if ( ! $licenses ) {
+        if ( ! is_string( $licenses ) || '' === $licenses ) {
             continue;
         }
 
         if ( $products ) {
             $result[] = $product;
         } else {
-            $result = array_merge( $result, explode( ',', $licenses ) );
+            foreach ( explode( ',', $licenses ) as $license ) {
+                $license = trim( $license );
+                if ( preg_match( '/^[0-9a-f]{24}$/i', $license ) ) {
+                    $result[] = $license;
+                }
+            }
         }
     }
 
-    return $result;
+    return $products ? $result : array_values( array_unique( $result ) );
+}
+
+/**
+ * Resolve a purchased WooCommerce product for a requested course.
+ */
+function spot_woo_order_product_for_course( WC_Order $order, int $product_id, string $course ): ?WC_Product {
+    $requested_courses = array_values( array_filter( array_map( 'trim', explode( ',', $course ) ), 'strlen' ) );
+    if ( ! $requested_courses ) {
+        return null;
+    }
+    foreach ( $requested_courses as $requested_course ) {
+        if ( ! preg_match( '/^[0-9a-f]{24}$/i', $requested_course ) ) {
+            return null;
+        }
+    }
+    if ( count( $requested_courses ) !== count( array_unique( $requested_courses ) ) ) {
+        return null;
+    }
+
+    foreach ( $order->get_items() as $item ) {
+        if ( ! $item instanceof WC_Order_Item_Product ) {
+            continue;
+        }
+        $product = $item->get_product();
+        if ( ! $product instanceof WC_Product || $product->get_id() !== $product_id ) {
+            continue;
+        }
+        $licenses = $product->get_meta( '_spotplayer_course' );
+        $licenses = is_string( $licenses ) ? array_values( array_unique( array_map( 'strtolower', array_map( 'trim', explode( ',', $licenses ) ) ) ) ) : [];
+        if ( count( $requested_courses ) === count( array_intersect( $licenses, array_map( 'strtolower', $requested_courses ) ) ) ) {
+            return $product;
+        }
+    }
+
+    return null;
 }
 
 /**
@@ -1717,16 +1882,58 @@ function spot_edd_payment_items( ?EDD_Payment $pay, $downloads = false ): array 
     $r = [];
     if ( $pay ) {
         foreach ( edd_get_payment_meta_cart_details( $pay->ID ) as $i ) {
+            if ( ! is_array( $i ) || ! isset( $i['id'] ) || ! is_scalar( $i['id'] ) ) {
+                continue;
+            }
             $c = get_post_meta( $i['id'], '_spot_course', true );
+            $c = is_array( $c ) ? $c : ( is_string( $c ) ? explode( ',', $c ) : [] );
+            $c = array_values( array_filter( $c, function ( $id ) {
+                return is_scalar( $id ) && preg_match( '/^[0-9a-f]{24}$/i', trim( (string) $id ) );
+            } ) );
+            $c = array_values( array_unique( array_map( 'trim', array_map( 'strval', $c ) ) ) );
             if ( ! $downloads ) {
                 $r = array_merge( $r, $c ?: [] );
-            } elseif ( $i['course'] = join( ',', $c ?: [] ) ) {
+            } elseif ( $i['course'] = join( ',', $c ) ) {
+                if ( ! isset( $i['name'] ) || ! is_scalar( $i['name'] ) ) {
+                    $i['name'] = get_the_title( (int) $i['id'] );
+                }
                 $r[] = $i;
             }
         }
     }
 
     return $r;
+}
+
+/**
+ * Resolve a purchased EDD download for a requested course.
+ *
+ * @return array<string, mixed>|null
+ */
+function spot_edd_payment_item_for_course( EDD_Payment $pay, int $download_id, string $course ): ?array {
+    $requested_courses = array_values( array_filter( array_map( 'trim', explode( ',', $course ) ), 'strlen' ) );
+    if ( ! $requested_courses || count( $requested_courses ) !== count( array_unique( $requested_courses ) ) ) {
+        return null;
+    }
+    foreach ( $requested_courses as $requested_course ) {
+        if ( ! preg_match( '/^[0-9a-f]{24}$/i', $requested_course ) ) {
+            return null;
+        }
+    }
+
+    foreach ( spot_edd_payment_items( $pay, true ) as $item ) {
+        if ( (int) ( $item['id'] ?? 0 ) !== $download_id ) {
+            continue;
+        }
+        $course_value = isset( $item['course'] ) && is_scalar( $item['course'] ) ? (string) $item['course'] : '';
+        $courses      = array_values( array_unique( array_map( 'trim', explode( ',', $course_value ) ) ) );
+        if ( count( $requested_courses ) === count( array_intersect( array_map( 'strtolower', $requested_courses ), array_map( 'strtolower', $courses ) ) ) ) {
+            $item['name'] = isset( $item['name'] ) && is_scalar( $item['name'] ) ? (string) $item['name'] : get_the_title( $download_id );
+            return $item;
+        }
+    }
+
+    return null;
 }
 
 /** @throws Exception */
@@ -1793,7 +2000,8 @@ function spot_edd_license_data( $payment ) { // dont rename $payment, maybe used
     if ( ! $payment ) {
         return [];
     }
-    if ( $data = $payment->get_meta( '_spot_data' ) ?: [] ) {
+    $data = $payment->get_meta( '_spot_data' ) ?: [];
+    if ( is_array( $data ) && ! empty( $data ) ) {
         return $data;
     }
 
@@ -1860,14 +2068,21 @@ function spot_eval_license_code( array $context = [] ): ?array {
 }
 
 function spot_acquire_license_lock( string $key ): bool {
-    if ( get_transient( $key ) ) {
+    $expires = (int) get_option( $key, 0 );
+    if ( $expires >= time() ) {
         return false;
     }
 
-    return set_transient( $key, 1, 30 );
+    if ( $expires > 0 ) {
+        delete_option( $key );
+    }
+
+    // add_option() uses the unique option name as an atomic DB-level guard.
+    return add_option( $key, time() + 30, '', false );
 }
 
 function spot_release_license_lock( string $key ): void {
+    delete_option( $key );
     delete_transient( $key );
 }
 
@@ -1891,10 +2106,15 @@ function spot_request_license_get( $id ) {
 
 /** @throws Exception */
 function spot_request_license_put( $j ) {
-    if ( empty( $j['name'] ) ) {
+    if ( ! is_array( $j ) || ! isset( $j['name'] ) || ! is_scalar( $j['name'] ) || '' === trim( (string) $j['name'] ) ) {
         throw new Exception( 'نام لایسنس خالی بود.', 999 );
     }
-    if ( empty( $j['watermark']['texts'][0]['text'] ) ) {
+    $watermark_text = isset( $j['watermark'] ) && is_array( $j['watermark'] ) &&
+        isset( $j['watermark']['texts'] ) && is_array( $j['watermark']['texts'] ) &&
+        isset( $j['watermark']['texts'][0] ) && is_array( $j['watermark']['texts'][0] )
+        ? ( $j['watermark']['texts'][0]['text'] ?? '' )
+        : '';
+    if ( ! is_scalar( $watermark_text ) || '' === trim( (string) $watermark_text ) ) {
         throw new Exception( 'واترمارک لایسنس خالی بود.', 999 );
     }
 
@@ -1916,7 +2136,10 @@ function spot_request_license_insert( $j ) {
 /** @throws Exception */
 function spot_request( string $url, $data = [] ) {
     $settings = spot_get_settings();
-    $api_key  = $settings['api'] ?? '';
+    $api_key  = isset( $settings['api'] ) && is_scalar( $settings['api'] ) ? trim( (string) $settings['api'] ) : '';
+    if ( '' === $api_key ) {
+        throw new Exception( 'کلید API اسپات پلیر تنظیم نشده است.', 999 );
+    }
     $headers  = [
         'Content-Type' => 'application/json',
         '$Level'       => '-1',
@@ -1925,6 +2148,9 @@ function spot_request( string $url, $data = [] ) {
     ];
     $is_post   = ! empty( $data );
     $body_json = $is_post ? wp_json_encode( $data, JSON_UNESCAPED_UNICODE ) : null;
+    if ( $is_post && false === $body_json ) {
+        throw new Exception( 'داده درخواست لایسنس قابل تبدیل به JSON نبود.', 999 );
+    }
     $status    = 0;
     $body      = '';
 
@@ -2040,11 +2266,12 @@ function spot_license_code() {
 
 function spot_hex2rgba( $h, $o = 1 ): string {
     $h = ltrim( (string) $h, '#' );
+    $opacity = max( 0, min( (float) $o, 1 ) );
     if ( strlen( $h ) !== 6 ) {
-        return 'rgba(102,17,221,' . min( (float) $o, 1 ) . ')';
+        return 'rgba(102,17,221,' . $opacity . ')';
     }
     $parts = [ $h[0] . $h[1], $h[2] . $h[3], $h[4] . $h[5] ];
     $rgb   = array_map( 'hexdec', $parts );
 
-    return 'rgba(' . implode( ',', $rgb ) . ',' . min( (float) $o, 1 ) . ')';
+    return 'rgba(' . implode( ',', $rgb ) . ',' . $opacity . ')';
 }

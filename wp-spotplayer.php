@@ -5,6 +5,8 @@
  * Description: ابتدا در تنظیمات اسپات پلیر کلید API و کد ساخت لایسنس و سپس شناسه دوره‌های هر محصول را وارد نمایید.
  * Author: SpotPlayer.ir
  * Author URI: https://spotplayer.ir/
+ * Text Domain: spotplayer
+ * Domain Path: /languages
  * Requires PHP: 7.1
  * WC requires at least: 7.0
  * WC tested up to: 9.8
@@ -1083,6 +1085,76 @@ function spot_woo_admin_order_save( $oid ) {
 
 add_action( 'woocommerce_process_shop_order_meta', 'spot_woo_admin_order_save', 10, 1 );
 
+/**
+ * Repair a missing customer only during an authenticated administrator save.
+ *
+ * This runs after WooCommerce's own order-data saver (priority 40), so an
+ * explicit customer selected in the order UI always wins.
+ *
+ * @param int             $order_id Order ID.
+ * @param WC_Order|object $order_or_post Order object in HPOS or post in legacy storage.
+ */
+function spot_repair_order_customer_on_admin_save( $order_id, $order_or_post = null ): void {
+    static $processed = [];
+
+    $order_id = absint( $order_id );
+    if ( ! is_admin() || ! $order_id || isset( $processed[ $order_id ] ) ) {
+        return;
+    }
+    $processed[ $order_id ] = true;
+
+    if ( isset( $_POST['customer_user'] ) ) {
+        // Respect an explicit customer/guest choice made in WooCommerce UI.
+        return;
+    }
+
+    $nonce_valid = false;
+    $nonce_value = isset( $_POST['woocommerce_meta_nonce'] ) && is_scalar( $_POST['woocommerce_meta_nonce'] )
+        ? $_POST['woocommerce_meta_nonce']
+        : '';
+    if ( $nonce_value !== '' ) {
+        $nonce_valid = wp_verify_nonce( wp_unslash( $nonce_value ), 'woocommerce_save_data' );
+    }
+
+    if ( ! $nonce_valid ) {
+        $nonce_value = isset( $_POST['_wpnonce'] ) && is_scalar( $_POST['_wpnonce'] ) ? $_POST['_wpnonce'] : '';
+        if ( $nonce_value !== '' ) {
+            $nonce_valid = wp_verify_nonce( wp_unslash( $nonce_value ), 'update-order_' . $order_id );
+        }
+    }
+
+    if ( ! $nonce_valid || ( ! current_user_can( 'edit_post', $order_id ) && ! current_user_can( 'edit_shop_order', $order_id ) ) ) {
+        return;
+    }
+
+    $order = $order_or_post instanceof WC_Order ? $order_or_post : wc_get_order( $order_id );
+    if ( ! $order instanceof WC_Order || (int) $order->get_customer_id() !== 0 ) {
+        return;
+    }
+    if ( ! count( spot_woo_order_items( $order ) ) && ! spot_check_order_has_any_license( $order_id ) ) {
+        return;
+    }
+
+    $user = spot_resolve_order_user( $order );
+    if ( ! $user instanceof WP_User ) {
+        return;
+    }
+
+    try {
+        $order->set_customer_id( $user->ID );
+        $order->save();
+        $order->add_order_note( sprintf(
+            /* translators: %d: WordPress user ID. */
+            __( 'SpotPlayer linked this order to WordPress user #%d during an administrator save.', 'spotplayer' ),
+            $user->ID
+        ) );
+    } catch ( Throwable $e ) {
+        // A repair failure must not break the normal WooCommerce order save.
+    }
+}
+
+add_action( 'woocommerce_process_shop_order_meta', 'spot_repair_order_customer_on_admin_save', 45, 2 );
+
 // EDD ADMIN DOWNLOAD -----------------------------------------------------------------------------------------
 function spot_edd_admin_dl( $dl_id ) {
     $stored_courses = get_post_meta( $dl_id, '_spot_course', true );
@@ -1848,6 +1920,66 @@ function spot_woo_license_data( WC_Order $ord ): array { // dont rename $order, 
     return $data ?: ( spot_woo_license_data_eval( $ord ) ?: [] );
 }
 
+/**
+ * Normalize a supported Iranian mobile number to the 09xxxxxxxxx format.
+ *
+ * Invalid or empty values intentionally normalize to an empty string. An
+ * empty value must never match another empty value during customer repair.
+ *
+ * @param mixed $number Raw phone value.
+ */
+function spot_normalize_mobile_number( $number ): string {
+    if ( ! is_scalar( $number ) ) {
+        return '';
+    }
+
+    $number = strtr( trim( (string) $number ), [
+        '۰' => '0', '۱' => '1', '۲' => '2', '۳' => '3', '۴' => '4',
+        '۵' => '5', '۶' => '6', '۷' => '7', '۸' => '8', '۹' => '9',
+        '٠' => '0', '١' => '1', '٢' => '2', '٣' => '3', '٤' => '4',
+        '٥' => '5', '٦' => '6', '٧' => '7', '٨' => '8', '٩' => '9',
+    ] );
+    $number = preg_replace( '/\D+/', '', $number );
+
+    if ( ! is_string( $number ) || $number === '' ) {
+        return '';
+    }
+
+    if ( substr( $number, 0, 4 ) === '0098' ) {
+        $number = substr( $number, 2 );
+    }
+    if ( substr( $number, 0, 2 ) === '98' ) {
+        $number = '0' . substr( $number, 2 );
+    } elseif ( strlen( $number ) === 10 && $number[0] === '9' ) {
+        $number = '0' . $number;
+    }
+
+    return preg_match( '/^09\d{9}$/', $number ) ? $number : '';
+}
+
+/**
+ * @return string[]
+ */
+function spot_order_customer_phone_meta_keys(): array {
+    $keys = apply_filters( 'spotplayer_customer_phone_meta_keys', [
+        'digits_phone',
+        'billing_phone',
+        'nikamooz_mobile',
+    ] );
+
+    if ( ! is_array( $keys ) ) {
+        return [];
+    }
+
+    $keys = array_filter( $keys, 'is_string' );
+
+    return array_values( array_unique( array_filter( array_map( 'sanitize_key', $keys ) ) ) );
+}
+
+/**
+ * Resolve a customer only when billing email and a supported billing phone
+ * belong to the same, already-existing WordPress user.
+ */
 function spot_resolve_order_user( ?WC_Order $order ): ?WP_User {
     if ( ! $order ) {
         return null;
@@ -1856,44 +1988,29 @@ function spot_resolve_order_user( ?WC_Order $order ): ?WP_User {
     $customer_id = (int) $order->get_customer_id();
     if ( $customer_id > 0 ) {
         $user = get_user_by( 'id', $customer_id );
-        if ( $user instanceof WP_User ) {
-            return $user;
-        }
+
+        return $user instanceof WP_User ? $user : null;
     }
 
-    $normalize_mobile = function( string $number ): string {
-        return preg_match( '#\+?(?:98|0)?(9\d{9})#', $number, $m ) ? '0' . $m[1] : '';
-    };
+    $order_phone = spot_normalize_mobile_number( $order->get_billing_phone() );
+    $order_email = strtolower( trim( (string) $order->get_billing_email() ) );
 
-    $order_phone = $normalize_mobile( (string) $order->get_billing_phone() );
-    $order_email = trim( (string) $order->get_billing_email() );
-
-    if ( $order_email !== '' && is_email( $order_email ) ) {
-        $user = get_user_by( 'email', $order_email );
-        if ( $user instanceof WP_User ) {
-            return $user;
-        }
+    // Both identifiers are required. Email-only or phone-only matching can
+    // silently reassign an order to the wrong account.
+    if ( $order_phone === '' || $order_email === '' || ! is_email( $order_email ) ) {
+        return null;
     }
 
-    if ( $order_phone !== '' ) {
-        $user = get_user_by( 'login', $order_phone );
-        if ( ! $user instanceof WP_User ) {
-            $user = get_user_by( 'login', substr( $order_phone, 1 ) );
-        }
-        if ( $user instanceof WP_User ) {
-            return $user;
-        }
+    $user = get_user_by( 'email', $order_email );
+    if ( ! $user instanceof WP_User ) {
+        return null;
+    }
 
-        $meta_keys = [ 'digits_phone', 'billing_phone', 'nikamooz_mobile' ];
-        foreach ( $meta_keys as $key ) {
-            $users = get_users( [
-                'meta_key'   => $key,
-                'meta_value' => $order_phone,
-                'number'     => 1,
-                'fields'     => 'all',
-            ] );
-            if ( ! empty( $users ) && $users[0] instanceof WP_User ) {
-                return $users[0];
+    foreach ( spot_order_customer_phone_meta_keys() as $key ) {
+        $values = get_user_meta( $user->ID, $key, false );
+        foreach ( (array) $values as $value ) {
+            if ( spot_normalize_mobile_number( $value ) === $order_phone ) {
+                return $user;
             }
         }
     }

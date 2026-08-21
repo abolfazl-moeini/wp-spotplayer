@@ -1848,33 +1848,70 @@ function spot_woo_license_data( WC_Order $ord ): array { // dont rename $order, 
     return $data ?: ( spot_woo_license_data_eval( $ord ) ?: [] );
 }
 
-function spot_woo_license_data_eval( ?WC_Order $order ): ?array { // dont rename $order & $user
+function spot_resolve_order_user( ?WC_Order $order ): ?WP_User {
     if ( ! $order ) {
         return null;
     }
-    /** @noinspection PhpUnusedLocalVariableInspection */
-    if ( ! ( $user = $order->get_user() ) ) {
-        $normalize_mobile_number = function( string $number ) {
-            if ( ! preg_match( '#\+?(?:98|0)?(9\d{9})#', $number, $matched ) ) {
-                return '';
-            }
 
-            return '0' . $matched[1];
-        };
+    $customer_id = (int) $order->get_customer_id();
+    if ( $customer_id > 0 ) {
+        $user = get_user_by( 'id', $customer_id );
+        if ( $user instanceof WP_User ) {
+            return $user;
+        }
+    }
 
-        if ( $billing_email = $order->get_billing_email() ) {
-            if ( $maybe_user = get_user_by( 'email', $billing_email ) ) {
-                $user_mobile = get_user_meta( $maybe_user->ID, 'nikamooz_mobile', true );
-                if ( $normalize_mobile_number( $user_mobile ) === $normalize_mobile_number( $order->get_billing_phone() ) ) {
-                    $order->set_customer_id( $maybe_user->ID );
-                    $order->save();
-                    $user = $maybe_user;
-                }
+    $normalize_mobile = function( string $number ): string {
+        return preg_match( '#\+?(?:98|0)?(9\d{9})#', $number, $m ) ? '0' . $m[1] : '';
+    };
+
+    $order_phone = $normalize_mobile( (string) $order->get_billing_phone() );
+    $order_email = trim( (string) $order->get_billing_email() );
+
+    if ( $order_email !== '' && is_email( $order_email ) ) {
+        $user = get_user_by( 'email', $order_email );
+        if ( $user instanceof WP_User ) {
+            return $user;
+        }
+    }
+
+    if ( $order_phone !== '' ) {
+        $user = get_user_by( 'login', $order_phone );
+        if ( ! $user instanceof WP_User ) {
+            $user = get_user_by( 'login', substr( $order_phone, 1 ) );
+        }
+        if ( $user instanceof WP_User ) {
+            return $user;
+        }
+
+        $meta_keys = [ 'digits_phone', 'billing_phone', 'nikamooz_mobile' ];
+        foreach ( $meta_keys as $key ) {
+            $users = get_users( [
+                'meta_key'   => $key,
+                'meta_value' => $order_phone,
+                'number'     => 1,
+                'fields'     => 'all',
+            ] );
+            if ( ! empty( $users ) && $users[0] instanceof WP_User ) {
+                return $users[0];
             }
         }
     }
 
-    return spot_eval_license_code( compact( 'order', 'user' ) );
+    return null;
+}
+
+function spot_woo_license_data_eval( ?WC_Order $order ): ?array { // dont rename $order & $user
+    if ( ! $order ) {
+        return null;
+    }
+
+    $user = spot_resolve_order_user( $order );
+
+    return spot_eval_license_code( [
+        'order' => $order,
+        'user'  => $user,
+    ] );
 }
 
 // EDD FUNCS ------------------------------------------------------------------------------------------------------------------
@@ -2032,14 +2069,21 @@ function spot_edd_license_data( $payment ) { // dont rename $payment, maybe used
     return $data;
 }
 
-function spot_edd_license_data_eval( ?EDD_Payment $payment ) { // dont rename $payment & $user
+function spot_edd_license_data_eval( ?EDD_Payment $payment ): ?array { // dont rename $payment & $user
     if ( ! $payment ) {
         return null;
     }
-    /** @noinspection PhpUnusedLocalVariableInspection */
-    $user = get_userdata( edd_get_payment_user_id( $payment->ID ) );
 
-    return spot_eval_license_code( compact( 'payment', 'user' ) );
+    $user_id = (int) edd_get_payment_user_id( $payment->ID );
+    $user = $user_id > 0 ? get_userdata( $user_id ) : null;
+    if ( ! $user instanceof WP_User ) {
+        $user = null;
+    }
+
+    return spot_eval_license_code( [
+        'payment' => $payment,
+        'user'    => $user,
+    ] );
 }
 
 // FUNCS ------------------------------------------------------------------------------------------------------------------
@@ -2054,6 +2098,10 @@ function spot_woo_or_edd(): int {
  * @return array<string, mixed>|null
  */
 function spot_eval_license_code( array $context = [] ): ?array {
+    $order   = $context['order'] ?? null;
+    $payment = $context['payment'] ?? null;
+    $user    = ( isset( $context['user'] ) && $context['user'] instanceof WP_User ) ? $context['user'] : null;
+
     if ( $context ) {
         extract( $context, EXTR_SKIP );
     }
@@ -2252,7 +2300,14 @@ function spot_admin_notices() {
 add_action( 'admin_notices', 'spot_admin_notices', 10 );
 
 function spot_license_code() {
-    $dgts = function_exists( 'digits_version' ) ? "\$user->get('digits_phone')" : null;
+    $dgts_woo = function_exists( 'digits_version' )
+        ? "( ( isset(\$user) && \$user instanceof WP_User && method_exists(\$user, 'get') ? \$user->get('digits_phone') : null ) ?: \$order->get_billing_phone() )"
+        : '$order->get_billing_phone()';
+
+    $dgts_edd = function_exists( 'digits_version' )
+        ? "( ( isset(\$user) && \$user instanceof WP_User && method_exists(\$user, 'get') ? \$user->get('digits_phone') : null ) ?: \$payment->email )"
+        : '$payment->email';
+
     $code = spot_get_settings()['code'] ?? '';
 
     if ( is_string( $code ) && trim( $code ) !== '' ) {
@@ -2260,8 +2315,8 @@ function spot_license_code() {
     }
 
     return spot_woo_or_edd() === 1
-        ? "[\n\t'name' => \$order->get_formatted_billing_full_name(), \n\t'watermark' => ['texts' => [['text' => " . ( $dgts ?: '$order->get_billing_phone()' ) . "]]]\n]"
-        : "[\n\t'name' => \$payment->first_name . ' ' . \$payment->last_name, \n\t'watermark' => ['texts' => [['text' => " . ( $dgts ?: '$payment->email' ) . "]]]\n]";
+        ? "[\n\t'name' => \$order->get_formatted_billing_full_name(), \n\t'watermark' => ['texts' => [['text' => " . $dgts_woo . "]]]\n]"
+        : "[\n\t'name' => \$payment->first_name . ' ' . \$payment->last_name, \n\t'watermark' => ['texts' => [['text' => " . $dgts_edd . "]]]\n]";
 }
 
 function spot_hex2rgba( $h, $o = 1 ): string {

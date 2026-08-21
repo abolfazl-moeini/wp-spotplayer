@@ -1103,8 +1103,8 @@ function spot_repair_order_customer_on_admin_save( $order_id, $order_or_post = n
     }
     $processed[ $order_id ] = true;
 
-    if ( isset( $_POST['customer_user'] ) ) {
-        // Respect an explicit customer/guest choice made in WooCommerce UI.
+    if ( isset( $_POST['customer_user'] ) && absint( $_POST['customer_user'] ) > 0 ) {
+        // Respect an explicit customer selected in WooCommerce UI.
         return;
     }
 
@@ -2004,6 +2004,10 @@ function spot_resolve_order_user( ?WC_Order $order ): ?WP_User {
     $user = get_user_by( 'email', $order_email );
     if ( ! $user instanceof WP_User ) {
         return null;
+    }
+
+    if ( spot_normalize_mobile_number( $user->user_login ) === $order_phone ) {
+        return $user;
     }
 
     foreach ( spot_order_customer_phone_meta_keys() as $key ) {

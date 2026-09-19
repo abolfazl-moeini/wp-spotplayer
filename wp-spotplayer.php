@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name: اسپات پلیر
- * Version: 17.1.2
+ * Version: 17.1.3
  * Description: ابتدا در تنظیمات اسپات پلیر کلید API و کد ساخت لایسنس و سپس شناسه دوره‌های هر محصول را وارد نمایید.
  * Author: SpotPlayer.ir
  * Author URI: https://spotplayer.ir/
@@ -16,7 +16,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'SPOT_VERSION', '17.1.2' );
+define( 'SPOT_VERSION', '17.1.3' );
 
 /**
  * Declare compatibility with WooCommerce High-Performance Order Storage (HPOS).
@@ -2360,6 +2360,14 @@ function spot_request( string $url, $data = [] ) {
         throw new Exception( 'هیچ متد درخواست HTTP در دسترس نیست.' );
     }
 
+    $rep = null;
+    if ( $body !== '' ) {
+        $rep = json_decode( $body, true );
+        if ( is_array( $rep ) && ! empty( $rep['ex']['msg'] ) ) {
+            throw new Exception( spot_sanitize_remote_message( $rep['ex']['msg'] ) );
+        }
+    }
+
     if ( $status && ( $status < 200 || $status >= 300 ) ) {
         throw new Exception( 'پاسخ ناموفق از سرور اسپات پلیر دریافت شد (' . $status . ').' );
     }
@@ -2368,12 +2376,8 @@ function spot_request( string $url, $data = [] ) {
         throw new Exception( 'پاسخ خالی از سرور اسپات پلیر دریافت شد.' );
     }
 
-    $rep = json_decode( $body, true );
     if ( ! is_array( $rep ) ) {
         throw new Exception( 'پاسخ نامعتبر از سرور اسپات پلیر دریافت شد.' );
-    }
-    if ( ! empty( $rep['ex']['msg'] ) ) {
-        throw new Exception( spot_sanitize_remote_message( $rep['ex']['msg'] ) );
     }
     if ( isset( $rep['_id'] ) && ! preg_match( '/^[0-9a-f]{24}$/i', (string) $rep['_id'] ) ) {
         throw new Exception( 'شناسه لایسنس دریافتی نامعتبر است.' );

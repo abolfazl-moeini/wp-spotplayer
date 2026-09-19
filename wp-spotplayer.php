@@ -987,6 +987,10 @@ function spot_woo_admin_order() {
 add_action( 'add_meta_boxes', 'spot_woo_admin_order', 0 );
 
 /**
+ * TODO: Enhance admin license creation with an AJAX modal/popup (see TODO.md).
+ * When clicking "ایجاد لایسنس", open an interactive modal showing real-time progress/error status
+ * without reloading the page, and only write critical milestone events to WooCommerce private order notes.
+ *
  * @param WC_Order|WP_Post|null $post_or_order_object Passed by WP/WC meta box API.
  */
 function spot_woo_admin_order_box( $post_or_order_object = null ) {
